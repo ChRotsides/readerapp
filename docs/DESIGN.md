@@ -88,3 +88,36 @@ If a site deliberately obfuscates text, do not try to defeat it.
   multiple distinct scenes, e.g. reciprocal rank fusion) + blend novel-profile score → Claude reranks top ~20 with reasons.
 - Generated scenes are shown to the user and are editable to refine the search.
 - Corpus/vector DB lives on a small server (not on device). Client is behind an interface so the backend can come later.
+
+### Discovery corpus (server-side crawler)
+- Purpose: discover novels the user hasn't read yet. No corpus exists yet — it is built by a polite server-side crawler.
+- Sources (all in scope, rough priority order):
+  - Catalog sites (crawled politely): **Webnovel** (required), NovelUpdates, Kakuyomu, Royal Road, Scribble Hub,
+    Wuxiaworld, Tapas (novels), Alphapolis (crawl-delay 3), Munpia (catalog only; viewer disallowed).
+  - Official metadata APIs (preferred over crawling when available): Syosetu novel API, AniList GraphQL (format NOVEL),
+    MyAnimeList API v2 (light novels / novels), MangaUpdates API (type Novel).
+  - Excluded: Wattpad and Novelpia (robots.txt disallows all crawling), Qidian/JJWXC/KakaoPage/Naver Series (app-only,
+    heavy anti-scraping), pirate/mirror aggregator sites. Inkitt: robots.txt unreadable — verify before adding.
+  - No crawlers/adapters are built that target pirate/mirror aggregator sites. The in-app browser stays general (no blocklist).
+
+### Duplicate handling (entity resolution)
+- Never overwrite source data: each site's `SourceRecord` is kept as crawled; records are *linked* to a canonical `Work`.
+- Step 1, hard matches: cross-source IDs (AniList↔MAL ids, MangaUpdates cross-links) and alias lists (NovelUpdates /
+  AniList / MAL alternate titles incl. native CJK titles → bridge to Syosetu, Kakuyomu, Munpia, etc.).
+- Step 2, candidates: normalized titles (lowercase, strip punctuation, drop "(WN)/(LN)", Unicode NFKC) in a trigram
+  index over all aliases + synopsis-embedding nearest neighbours.
+- Step 3, scoring: best alias title similarity, author match (incl. native script), synopsis cosine, original language,
+  start year, chapter count. High → auto-merge, low → separate, middle → **Jev** typed verdict
+  `SAME_WORK | DIFFERENT_WORK | RELATED_WORK` with probability; Claude as fallback when Jev is unsure.
+- RELATED_WORK (WN vs LN version, sequel, side story, alternate translation) → relation link, not a merge.
+- Field merge: synopsis from official source first (Webnovel/Wuxiaworld/Syosetu), then NovelUpdates; tags unioned and
+  mapped to a canonical tag vocabulary (NovelUpdates tags as base); ratings kept per source, normalized; all URLs kept.
+- Every link stores method + confidence; merges are reversible (unlink, no data loss). Re-crawls run the same pipeline.
+- Search results are grouped by `Work`.
+- Per catalog novel store **metadata only**: title, author, synopsis, tags, genres, rating, a few review snippets, source URL
+  → embedded as the novel profile. Optionally embed the first 2–3 **free** chapters as vectors only (text discarded after
+  embedding). Never paid/locked chapters. Full chunks only for novels in the user's own library.
+- Respect robots.txt and site terms, low request rate, cache, back off on blocks; if a site actively blocks the crawler,
+  don't evade it — drop to metadata the user imports manually.
+- HyDE matches on two levels: Claude-written hypothetical **scenes** → sample-chapter vectors, and a Claude-written
+  hypothetical **synopsis + tag list** → novel profiles. Blend, then Claude reranks.
