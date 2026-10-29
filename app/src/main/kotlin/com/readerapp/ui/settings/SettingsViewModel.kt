@@ -2,6 +2,8 @@ package com.readerapp.ui.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.readerapp.ai.UsageRepository
+import com.readerapp.data.settings.AiSettings
 import com.readerapp.data.settings.ReaderPrefs
 import com.readerapp.data.settings.ReaderPrefsRepository
 import com.readerapp.data.settings.SecretKeyName
@@ -19,7 +21,19 @@ import javax.inject.Inject
 class SettingsViewModel @Inject constructor(
     private val secure: SecureSettings,
     private val prefsRepo: ReaderPrefsRepository,
+    private val aiSettings: AiSettings,
+    usage: UsageRepository,
 ) : ViewModel() {
+    val monthlyCapUsd: StateFlow<Double> = aiSettings.monthlyCapUsd
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AiSettings.DEFAULT_CAP_USD)
+
+    val monthToDateUsd: StateFlow<Double> = usage.observeMonthToDateUsd()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0.0)
+
+    fun setMonthlyCap(usd: Double) {
+        viewModelScope.launch { aiSettings.setMonthlyCapUsd(usd) }
+    }
+
     val secrets: StateFlow<Secrets> = secure.secrets
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), Secrets())
 

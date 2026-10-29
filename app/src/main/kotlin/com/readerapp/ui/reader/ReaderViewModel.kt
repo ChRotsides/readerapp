@@ -79,6 +79,8 @@ class ReaderViewModel @Inject constructor(
                     is FetchOutcome.Success -> text = chapters.getText(chapterId)
                     is FetchOutcome.Locked ->
                         return@launch run { _state.value = ReaderUiState.Error(chapter, outcome.reason, locked = true) }
+                    is FetchOutcome.NeedsBrowser ->
+                        return@launch run { _state.value = ReaderUiState.Error(chapter, outcome.reason, locked = false) }
                     is FetchOutcome.Failed ->
                         return@launch run { _state.value = ReaderUiState.Error(chapter, outcome.reason, locked = false) }
                 }

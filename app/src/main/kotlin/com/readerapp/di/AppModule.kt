@@ -10,6 +10,7 @@ import com.readerapp.data.db.AppDatabase
 import com.readerapp.scrape.ChapterExtractor
 import com.readerapp.scrape.ExtractorChain
 import com.readerapp.scrape.GenericExtractor
+import com.readerapp.scrape.adapter.AdapterExtractor
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -31,17 +32,17 @@ object AppModule {
     @Provides fun glossaryDao(db: AppDatabase) = db.glossaryDao()
     @Provides fun chapterSummaryDao(db: AppDatabase) = db.chapterSummaryDao()
     @Provides fun adapterDao(db: AppDatabase) = db.adapterDao()
+    @Provides fun domainStateDao(db: AppDatabase) = db.domainStateDao()
+    @Provides fun aiUsageDao(db: AppDatabase) = db.aiUsageDao()
 
     @Provides
     @Singleton
     fun settingsDataStore(@ApplicationContext context: Context): DataStore<Preferences> =
         PreferenceDataStoreFactory.create { context.preferencesDataStoreFile("settings") }
 
-    /**
-     * Extension point (Milestone 2): put the adapter-based extractor ahead of [GenericExtractor], e.g.
-     * `ExtractorChain(listOf(adapterExtractor, generic))`, so adapters win and Readability is the fallback.
-     */
+    /** Active site adapter first, Readability-based generic extractor as the fallback. */
     @Provides
     @Singleton
-    fun chapterExtractor(generic: GenericExtractor): ChapterExtractor = ExtractorChain(listOf(generic))
+    fun chapterExtractor(adapter: AdapterExtractor, generic: GenericExtractor): ChapterExtractor =
+        ExtractorChain(listOf(adapter, generic))
 }

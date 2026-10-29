@@ -17,9 +17,14 @@ import javax.inject.Inject
 class MainActivity : ComponentActivity() {
     @Inject lateinit var prefsRepository: ReaderPrefsRepository
 
+    private val notificationPermission =
+        registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Adapter fixes/failures are reported by notification (Android 13+ needs the runtime permission).
+        notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         setContent {
             val prefs by prefsRepository.prefs.collectAsState(initial = ReaderPrefs())
             ReaderAppTheme(themeMode = prefs.themeMode) {

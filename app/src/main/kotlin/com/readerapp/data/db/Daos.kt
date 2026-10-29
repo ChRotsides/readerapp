@@ -99,6 +99,27 @@ interface ChapterDao {
 
     @Query("UPDATE chapters SET `read` = :read WHERE id = :id")
     suspend fun setRead(id: Long, read: Boolean)
+
+    @Query("UPDATE chapters SET flagged = :flagged WHERE id = :id")
+    suspend fun setFlagged(id: Long, flagged: Boolean)
+
+    /** Fetched chapter URLs of [domain] (other than [excludeUrl]), newest first: known-readable validation samples. */
+    @Query(
+        """
+        SELECT c.url FROM chapters c JOIN novels n ON n.id = c.novelId
+        WHERE n.domain = :domain AND c.status = 'FETCHED' AND c.url != :excludeUrl
+        ORDER BY c.id DESC LIMIT :limit
+        """,
+    )
+    suspend fun sampleUrls(domain: String, excludeUrl: String, limit: Int): List<String>
+
+    @Query(
+        """
+        SELECT c.url FROM chapters c JOIN novels n ON n.id = c.novelId
+        WHERE n.domain = :domain AND c.status = 'FETCHED' ORDER BY c.id DESC LIMIT 1
+        """,
+    )
+    suspend fun latestFetchedUrl(domain: String): String?
 }
 
 @Dao
@@ -166,11 +187,17 @@ interface AdapterDao {
     @Query("UPDATE site_adapters SET status = :status WHERE domain = :domain AND version = :version")
     suspend fun setStatus(domain: String, version: Int, status: AdapterStatus)
 
-    @Query("UPDATE site_adapters SET successCount = successCount + 1, lastSuccessAt = :now WHERE domain = :domain AND version = :version")
+    @Query("UPDATE site_adapters SET successCount = successCount + 1, consecutiveFailures = 0, lastSuccessAt = :now WHERE domain = :domain AND version = :version")
     suspend fun recordSuccess(domain: String, version: Int, now: Long)
 
-    @Query("UPDATE site_adapters SET failCount = failCount + 1 WHERE domain = :domain AND version = :version")
+    @Query("UPDATE site_adapters SET failCount = failCount + 1, consecutiveFailures = consecutiveFailures + 1 WHERE domain = :domain AND version = :version")
     suspend fun recordFailure(domain: String, version: Int)
+
+    @Query("UPDATE site_adapters SET consecutiveFailures = 0 WHERE domain = :domain AND version = :version")
+    suspend fun resetFailures(domain: String, version: Int)
+
+    @Query("SELECT * FROM site_adapters WHERE domain = :domain AND version = :version")
+    suspend fun get(domain: String, version: Int): SiteAdapter?
 
     @Query("SELECT * FROM adapter_fixtures WHERE id = :id")
     suspend fun fixture(id: Long): AdapterFixture?
@@ -180,4 +207,28 @@ interface AdapterDao {
 
     @Insert
     suspend fun insertFixture(fixture: AdapterFixture): Long
+}
+
+@Dao
+interface DomainStateDao {
+    @Query("SELECT * FROM domain_state WHERE domain = :domain")
+    suspend fun get(domain: String): DomainState?
+
+    @Query("SELECT * FROM domain_state")
+    fun observeAll(): Flow<List<DomainState>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(state: DomainState)
+}
+
+@Dao
+interface AiUsageDao {
+    @Insert
+    suspend fun insert(usage: AiUsage)
+
+    @Query("SELECT COALESCE(SUM(costMicros), 0) FROM ai_usage WHERE createdAt >= :since")
+    suspend fun costSince(since: Long): Long
+
+    @Query("SELECT COALESCE(SUM(costMicros), 0) FROM ai_usage WHERE createdAt >= :since")
+    fun observeCostSince(since: Long): Flow<Long>
 }

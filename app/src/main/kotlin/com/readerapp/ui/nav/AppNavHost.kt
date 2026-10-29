@@ -8,6 +8,7 @@ import com.readerapp.ui.browser.BrowserScreen
 import com.readerapp.ui.detail.NovelDetailScreen
 import com.readerapp.ui.library.LibraryScreen
 import com.readerapp.ui.reader.ReaderScreen
+import com.readerapp.ui.adapters.AdaptersScreen
 import com.readerapp.ui.settings.SettingsScreen
 import kotlinx.serialization.Serializable
 
@@ -16,6 +17,7 @@ import kotlinx.serialization.Serializable
 @Serializable data class NovelRoute(val novelId: Long)
 @Serializable data class ReaderRoute(val chapterId: Long)
 @Serializable object SettingsRoute
+@Serializable object AdaptersRoute
 
 @Composable
 fun AppNavHost() {
@@ -50,6 +52,9 @@ fun AppNavHost() {
                 onOpenInBrowser = { nav.navigate(BrowserRoute(it)) },
             )
         }
-        composable<SettingsRoute> { SettingsScreen(onBack = { nav.popBackStack() }) }
+        composable<SettingsRoute> {
+            SettingsScreen(onBack = { nav.popBackStack() }, onOpenAdapters = { nav.navigate(AdaptersRoute) })
+        }
+        composable<AdaptersRoute> { AdaptersScreen(onBack = { nav.popBackStack() }) }
     }
 }

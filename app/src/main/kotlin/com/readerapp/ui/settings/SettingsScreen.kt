@@ -43,9 +43,11 @@ import com.readerapp.data.settings.maskSecret
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit, viewModel: SettingsViewModel = hiltViewModel()) {
+fun SettingsScreen(onBack: () -> Unit, onOpenAdapters: () -> Unit, viewModel: SettingsViewModel = hiltViewModel()) {
     val secrets by viewModel.secrets.collectAsStateWithLifecycle()
     val prefs by viewModel.prefs.collectAsStateWithLifecycle()
+    val cap by viewModel.monthlyCapUsd.collectAsStateWithLifecycle()
+    val spent by viewModel.monthToDateUsd.collectAsStateWithLifecycle()
 
     Scaffold(
         topBar = {
@@ -73,6 +75,16 @@ fun SettingsScreen(onBack: () -> Unit, viewModel: SettingsViewModel = hiltViewMo
             SecretField("Jev base URL", secrets.jevBaseUrl, masked = false,
                 onSave = { viewModel.saveSecret(SecretKeyName.JEV_BASE_URL, it) },
                 onClear = { viewModel.clearSecret(SecretKeyName.JEV_BASE_URL) })
+
+            HorizontalDivider()
+            Text("AI spending", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Spent this month: ${"$%.4f".format(spent)} of ${"$%.2f".format(cap)}. " +
+                    "Adapter generation and repair stop when the cap is reached.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            CapField(cap, onSave = viewModel::setMonthlyCap)
+            OutlinedButton(onClick = onOpenAdapters) { Text("Site adapters") }
 
             HorizontalDivider()
             Text("Reader", style = MaterialTheme.typography.titleMedium)
@@ -123,5 +135,23 @@ private fun SecretField(
             OutlinedButton(enabled = input.isNotBlank(), onClick = { onSave(input); input = "" }) { Text("Save") }
             TextButton(enabled = stored != null, onClick = { onClear(); input = "" }) { Text("Clear") }
         }
+    }
+}
+
+@Composable
+private fun CapField(capUsd: Double, onSave: (Double) -> Unit) {
+    var input by remember { mutableStateOf("") }
+    val parsed = input.trim().toDoubleOrNull()?.takeIf { it >= 0 }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            value = input,
+            onValueChange = { input = it },
+            label = { Text("Monthly cap (USD)") },
+            placeholder = { Text("%.2f".format(capUsd)) },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            modifier = Modifier.weight(1f),
+        )
+        OutlinedButton(enabled = parsed != null, onClick = { parsed?.let(onSave); input = "" }) { Text("Save") }
     }
 }

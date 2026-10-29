@@ -47,6 +47,13 @@ class ChapterRepository @Inject constructor(
 
     suspend fun updateScroll(chapterId: Long, index: Int, offset: Int) = chapters.setScroll(chapterId, index, offset)
 
+    suspend fun setFlagged(chapterId: Long, flagged: Boolean) = chapters.setFlagged(chapterId, flagged)
+
+    suspend fun sampleUrls(domain: String, excludeUrl: String, limit: Int): List<String> =
+        chapters.sampleUrls(domain, excludeUrl, limit)
+
+    suspend fun latestFetchedUrl(domain: String): String? = chapters.latestFetchedUrl(domain)
+
     suspend fun setRead(chapterId: Long, read: Boolean = true) = chapters.setRead(chapterId, read)
 
     /** Inserts a chapter placed at [index] unless the novel already has that URL. Returns the stored chapter. */

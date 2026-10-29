@@ -1,8 +1,10 @@
 package com.readerapp.scrape
 
 import com.readerapp.data.db.Novel
+import com.readerapp.data.repo.AdapterStore
 import com.readerapp.data.repo.ChapterRepository
 import com.readerapp.data.repo.NovelRepository
+import com.readerapp.scrape.heal.RepairScheduler
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -24,6 +26,8 @@ class NovelImporter @Inject constructor(
     private val extractor: ChapterExtractor,
     private val novels: NovelRepository,
     private val chapters: ChapterRepository,
+    private val adapters: AdapterStore,
+    private val scheduler: RepairScheduler,
 ) {
     suspend fun prepare(page: FetchedPage): Result<ImportDraft> =
         when (val result = extractor.extract(page)) {
@@ -41,6 +45,7 @@ class NovelImporter @Inject constructor(
         val page = draft.page
         val chapterData = draft.extraction.chapter
         val title = novelTitle.trim().ifEmpty { draft.suggestedTitle }
+        maybeScheduleAdapterGeneration(page.url)
 
         chapters.findAnyByUrl(page.url)?.let { existing ->
             if (existing.status != com.readerapp.data.db.ChapterStatus.FETCHED) {
@@ -67,6 +72,17 @@ class NovelImporter @Inject constructor(
         val chapter = chapters.insertIfAbsent(novelId, page.url, index, chapterData.title.orEmpty())
         chapters.storeFetched(chapter, chapterData.title, chapterData.paragraphs, chapterData.nextUrl, chapterData.prevUrl)
         return ImportResult.Imported(novelId, chapter.id)
+    }
+
+    /**
+     * New domain (no adapter version yet, and generation has not already been given up on): a background job asks
+     * Sonnet to write v1. Until it finishes the generic extractor is used.
+     */
+    private suspend fun maybeScheduleAdapterGeneration(pageUrl: String) {
+        val domain = DomainRateLimiter.domainOf(pageUrl)
+        if (adapters.versions(domain).isNotEmpty()) return
+        if (adapters.domainState(domain)?.genericFallback == true) return
+        scheduler.scheduleGeneration(domain, pageUrl, null)
     }
 
     private suspend fun indexInExisting(novelId: Long, data: ExtractedChapter): Int {

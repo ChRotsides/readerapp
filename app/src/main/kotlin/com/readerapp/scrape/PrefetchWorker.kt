@@ -41,7 +41,7 @@ class PrefetchWorker @AssistedInject constructor(
             when (val outcome = fetcher.ensureFetched(target.id)) {
                 is FetchOutcome.Success -> cursor = outcome.chapter
                 // Locked/failed chapter: stop here, the chain beyond it is unknown or inaccessible.
-                is FetchOutcome.Locked, is FetchOutcome.Failed -> return Result.success()
+                is FetchOutcome.Locked, is FetchOutcome.Failed, is FetchOutcome.NeedsBrowser -> return Result.success()
             }
             fetched++
         }
