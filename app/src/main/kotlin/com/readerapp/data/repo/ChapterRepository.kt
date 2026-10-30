@@ -85,6 +85,15 @@ class ChapterRepository @Inject constructor(
     suspend fun nextN(chapter: Chapter, limit: Int): List<Chapter> =
         current(chapter).let { chapters.nextN(it.novelId, it.index, it.id, limit) }
 
+    /** First NOT_FETCHED chapter after [anchor] in reading order; from the very beginning when [anchor] is null. */
+    suspend fun nextUnfetchedFrom(novelId: Long, anchor: Chapter?): Chapter? =
+        if (anchor == null) chapters.nextUnfetchedAfter(novelId, Int.MIN_VALUE, 0)
+        else current(anchor).let { chapters.nextUnfetchedAfter(it.novelId, it.index, it.id) }
+
+    suspend fun unfetchedCountFrom(novelId: Long, anchor: Chapter?): Int =
+        if (anchor == null) chapters.unfetchedCountAfter(novelId, Int.MIN_VALUE, 0)
+        else current(anchor).let { chapters.unfetchedCountAfter(it.novelId, it.index, it.id) }
+
     suspend fun inRange(novelId: Long, from: Int, to: Int): List<Chapter> = chapters.inRange(novelId, from, to)
 
     suspend fun fetchedBefore(novelId: Long, index: Int, limit: Int): List<Chapter> =

@@ -4,7 +4,8 @@ from types import SimpleNamespace as NS
 import httpx
 import pytest
 
-from readerserver.ai.embeddings import VoyageEmbedder
+from readerserver.ai import embeddings as embeddings_mod
+from readerserver.ai.embeddings import EmbeddingRateLimited, VoyageEmbedder
 from readerserver.ai.jev import ClaudeVerdict, CompositeVerdict, JevClient
 from readerserver.ai.llm import FALLBACK_BETA, ClaudeLLM, LLMRefusal, LLMTruncated
 from readerserver.ai.spend import BudgetExceeded, SpendTracker
@@ -76,6 +77,7 @@ class FakeVoyage:
         self.calls = []
 
     async def embed(self, texts, model, input_type=None, truncation=None, output_dimension=None, output_dtype="float"):
+        assert truncation is False
         self.calls.append(dict(n=len(texts), model=model, input_type=input_type, dim=output_dimension))
         return NS(embeddings=[[0.1] * 4 for _ in texts], total_tokens=10 * len(texts))
 
@@ -217,3 +219,36 @@ async def test_sdk_errors_become_llm_error_and_release_reservation(spend):
         with pytest.raises(LLMError):
             await llm.parse(model=model, system="s", user="u", schema=RerankOutput, effort="low", max_tokens=100, purpose="x")
     assert await spend._held() == 0
+
+
+class RateLimitError(Exception):  # same class name the voyageai SDK raises
+    pass
+
+
+class FlakyVoyage(FakeVoyage):
+    def __init__(self, failures):
+        super().__init__()
+        self.failures = failures
+
+    async def embed(self, texts, model, **kw):
+        if self.failures:
+            self.failures -= 1
+            self.calls.append("429")
+            raise RateLimitError("3 RPM")
+        return await super().embed(texts, model, **kw)
+
+
+async def test_voyage_rate_limit_fails_fast_for_search(spend):
+    fv = FlakyVoyage(failures=1)
+    emb = VoyageEmbedder(Settings(), spend, client=fv)
+    with pytest.raises(EmbeddingRateLimited):
+        await emb.embed(["q"], "query", "search", patient=False)
+    assert fv.calls == ["429"]  # no retries while the user waits
+
+
+async def test_voyage_rate_limit_waits_and_retries_in_background(spend, monkeypatch):
+    monkeypatch.setattr(embeddings_mod, "RATE_LIMIT_BACKOFF_S", 0)
+    fv = FlakyVoyage(failures=2)
+    emb = VoyageEmbedder(Settings(), spend, client=fv)
+    out = await emb.embed(["x"], "document", "profile")
+    assert len(out) == 1 and fv.calls[:2] == ["429", "429"]

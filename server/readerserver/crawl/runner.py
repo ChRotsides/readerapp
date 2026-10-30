@@ -169,7 +169,7 @@ class CrawlRunner:
             await s.commit()
 
     async def sample_chapters(self, source: Source, limit: int = 20) -> int:
-        """Embed the first N free chapters (sources that support it); text is discarded right after embedding.
+        """Embed the first N free chapters (sources that support it), storing their chunks with the vectors.
         A 403/challenge/robots block here marks the whole source blocked, exactly as in the catalog crawl."""
         if self.embedder is None or self.settings.sample_chapters <= 0:
             return 0
@@ -200,27 +200,29 @@ class CrawlRunner:
                 done += await index_sample_text(s, self.embedder, self.settings, r, texts)
         return done
 
-    async def process_pending(self, batch: int = 200, resolve_batch: int = 50) -> dict:
+    async def process_pending(self, batch: int = 200, resolve_batch: int = 50, record_ids: list[int] | None = None) -> dict:
         """Shared pipeline for all sources: per bounded batch, synopsis vectors -> resolve; then profile vectors.
         Serialized across processes by a Postgres advisory lock. Records whose prerequisites are missing (embedding
         unavailable, verdict provider down) stay pending with a durable reason + retry time; one bad record never
-        loses the batch (each is isolated in a savepoint)."""
+        loses the batch (each is isolated in a savepoint). `record_ids` limits resolution to those records (profile indexing
+        still covers every work that needs it)."""
         out = {"synopses": 0, "resolved": 0, "deferred": 0, "failed": 0, "profiles": 0}
         async with self.maker() as lock_session:
             await lock_session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": RESOLVE_LOCK_KEY})  # held until rollback
             try:
-                await self._process_locked(out, batch, resolve_batch)
+                await self._process_locked(out, batch, resolve_batch, record_ids)
             finally:
                 await lock_session.rollback()
         return out
 
-    async def _process_locked(self, out: dict, batch: int, resolve_batch: int) -> None:
+    async def _process_locked(self, out: dict, batch: int, resolve_batch: int, record_ids: list[int] | None = None) -> None:
         last_id = 0
         while True:
             async with self.maker() as s:
                 recs = list((await s.scalars(select(SourceRecord).where(
                     SourceRecord.needs_resolution.is_(True), SourceRecord.id > last_id,
                     or_(SourceRecord.resolve_retry_at.is_(None), SourceRecord.resolve_retry_at <= datetime.now(UTC)),
+                    *([SourceRecord.id.in_(record_ids)] if record_ids is not None else []),
                 ).order_by(SourceRecord.id).limit(resolve_batch))).all())
                 if not recs:
                     break

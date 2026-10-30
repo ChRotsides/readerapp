@@ -33,6 +33,16 @@ interface DiscoveryApi {
     suspend fun work(workId: String): Work
     suspend fun searchTitle(query: String, limit: Int = 20): List<Work>
     suspend fun testConnection(): ConnectionResult
+
+    suspend fun startCrawl(request: CrawlRequest): CrawlJob
+    /** Newest first. */
+    suspend fun crawlJobs(): List<CrawlJob>
+    suspend fun pauseCrawl(id: Long): CrawlJob
+    suspend fun resumeCrawl(id: Long): CrawlJob
+    suspend fun cancelCrawl(id: Long): CrawlJob
+
+    /** Sends chapters the user downloaded to the server's search index (at most [LibraryUploadRequest.MAX_CHAPTERS]). */
+    suspend fun uploadLibraryChapters(request: LibraryUploadRequest): LibraryUploadResult
 }
 
 data class ServerConfig(val baseUrl: String, val token: String)
@@ -58,6 +68,26 @@ class ServerApi(
         call("works", { get() }, null, { addQueryParameter("query", query.trim()); addQueryParameter("limit", limit.toString()) }) {
             json.decodeFromString(ListSerializer(Work.serializer()), it)
         }
+
+    override suspend fun startCrawl(request: CrawlRequest): CrawlJob {
+        val body = nullsJson.encodeToString(CrawlRequest.serializer(), request).toRequestBody(JSON_MEDIA)
+        return call("crawl-jobs", { post(body) }, null) { json.decodeFromString(CrawlJob.serializer(), it) }
+    }
+
+    override suspend fun crawlJobs(): List<CrawlJob> =
+        call("crawl-jobs", { get() }, null) { json.decodeFromString(ListSerializer(CrawlJob.serializer()), it) }
+
+    override suspend fun pauseCrawl(id: Long): CrawlJob = crawlAction(id, "pause")
+    override suspend fun resumeCrawl(id: Long): CrawlJob = crawlAction(id, "resume")
+    override suspend fun cancelCrawl(id: Long): CrawlJob = crawlAction(id, "cancel")
+
+    private suspend fun crawlAction(id: Long, action: String): CrawlJob =
+        call("crawl-jobs/$id/$action", { post(ByteArray(0).toRequestBody(null)) }, null) { json.decodeFromString(CrawlJob.serializer(), it) }
+
+    override suspend fun uploadLibraryChapters(request: LibraryUploadRequest): LibraryUploadResult {
+        val body = nullsJson.encodeToString(LibraryUploadRequest.serializer(), request).toRequestBody(JSON_MEDIA)
+        return call("library/chapters", { post(body) }, null) { json.decodeFromString(LibraryUploadResult.serializer(), it) }
+    }
 
     override suspend fun testConnection(): ConnectionResult = withContext(Dispatchers.IO) {
         try {
@@ -165,6 +195,9 @@ class ServerApi(
         private val JSON_MEDIA = "application/json".toMediaType()
 
         val json = Json { ignoreUnknownKeys = true; coerceInputValues = true; explicitNulls = false; encodeDefaults = true }
+
+        /** For request bodies whose nulls are meaningful (`chapters_per_novel: null` = all chapters). */
+        private val nullsJson = Json(json) { explicitNulls = true }
 
         /** Search runs Claude (HyDE + rerank) on the server and can take 20-40 s. */
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()

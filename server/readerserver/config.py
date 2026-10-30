@@ -30,6 +30,18 @@ class Settings(BaseSettings):
     voyage_price_per_mtok: float = 0.12  # estimate; override if pricing changes
     jev_price_per_call: float = 0.002  # estimate
 
+    recipe_model: str = "claude-sonnet-5-5"  # writes / repairs site recipes (link crawls)
+    recipe_effort: str = "medium"
+    decision_model: str = "claude-haiku-5-5"  # Claude fallback for the link-crawl Jev decisions
+    decision_effort: str = "low"
+    link_first_chapters_judged: int = 3  # chapters per novel always run through the content decision (c)
+    link_max_listing_pages: int = 100  # runaway guards per job
+    link_max_novels: int = 1000
+    link_max_toc_pages: int = 200
+    link_max_page_bytes: int = 3_000_000  # response size cap for crawled pages
+    link_max_attempts: int = 3  # times a job may be reclaimed after its worker died before it is failed
+    link_consecutive_failures: int = 5  # chapter/novel fetch failures in a row before the job fails
+
     monthly_ai_budget_usd: float = Field(default=5.0)
 
     crawler_contact: str = "unset@example.invalid"

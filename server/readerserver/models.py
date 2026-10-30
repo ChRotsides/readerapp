@@ -208,18 +208,45 @@ class ProfileEmbedding(Base):
     )
 
 
+
 class SampleEmbedding(Base):
-    """Vectors of sample-chapter chunks. Chapter text is never stored."""
+    """Vectors and text of chapter chunks.
+
+    Catalog sample chapters have chapter_index NULL and chunk_index
+    counting across the whole sample. Full-chapter embeddings carry
+    the chapter index, chunk index, and chapter hash.
+    """
 
     __tablename__ = "sample_embeddings"
+
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    source_record_id: Mapped[int] = mapped_column(ForeignKey("source_records.id", ondelete="CASCADE"))
+    source_record_id: Mapped[int] = mapped_column(
+        ForeignKey("source_records.id", ondelete="CASCADE")
+    )
     chunk_index: Mapped[int] = mapped_column(Integer)
+    chunk_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     token_count: Mapped[int] = mapped_column(Integer, default=0)
     model: Mapped[str] = mapped_column(String(40))
     embedding = mapped_column(Vector(DIM))
+    chapter_index: Mapped[int | None] = mapped_column(Integer)
+    chapter_hash: Mapped[str | None] = mapped_column(String(64))
+
     __table_args__ = (
-        UniqueConstraint("source_record_id", "chunk_index", name="uq_sample_chunk"),
+        Index(
+            "uq_sample_chunk",
+            "source_record_id",
+            "chunk_index",
+            unique=True,
+            postgresql_where=text("chapter_index IS NULL"),
+        ),
+        Index(
+            "uq_chapter_chunk",
+            "source_record_id",
+            "chapter_index",
+            "chunk_index",
+            unique=True,
+            postgresql_where=text("chapter_index IS NOT NULL"),
+        ),
         Index(
             "ix_sample_embeddings_hnsw",
             "embedding",
@@ -276,3 +303,47 @@ class SpendReservation(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     amount_usd: Mapped[float] = mapped_column(Numeric(12, 6), default=0)
     purpose: Mapped[str] = mapped_column(String(40), default="")
+
+
+class SiteRecipe(Base):
+    """Claude-written CSS-selector recipe for one site (data, not code); versioned per domain. At most one is active.
+    Extraction with a recipe is plain parsing: no AI per page."""
+
+    __tablename__ = "site_recipes"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    domain: Mapped[str] = mapped_column(String(255))
+    version: Mapped[int] = mapped_column(Integer)
+    recipe: Mapped[dict] = mapped_column(JSONB)  # {"listing": {...}|null, "novel": {...}, "chapter": {...}}
+    status: Mapped[str] = mapped_column(String(12), default="active")  # active | broken | superseded (older, still usable as a fallback)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+    notes: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (
+        UniqueConstraint("domain", "version", name="uq_site_recipe_version"),
+        Index("uq_site_recipe_active", "domain", unique=True, postgresql_where=text("status = 'active'")),
+    )
+
+
+class LinkCrawlJob(Base):
+    """A user-submitted "crawl this link" job, run in the background by the worker (see linkcrawl/crawler.py)."""
+
+    __tablename__ = "link_crawl_jobs"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    url: Mapped[str] = mapped_column(Text)
+    domain: Mapped[str] = mapped_column(String(255))
+    scope: Mapped[str] = mapped_column(String(10))  # novel | site
+    chapters_per_novel: Mapped[int | None] = mapped_column(Integer)  # NULL = all chapters
+    status: Mapped[str] = mapped_column(String(10), default="queued")  # queued|running|paused|done|failed|cancelled|blocked
+    pages_fetched: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    novels_found: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    chapters_embedded: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    chapters_skipped: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    spend_usd: Mapped[float] = mapped_column(Numeric(12, 6), default=0, server_default=text("0"))
+    error: Mapped[str | None] = mapped_column(Text)
+    checkpoint: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))  # reclaims after a worker died mid-run
+    lease_owner: Mapped[str | None] = mapped_column(String(40))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_eligible_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # deferred (Retry-After) until
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now(), onupdate=_now())
+    __table_args__ = (Index("ix_link_crawl_jobs_status", "status"), Index("ix_link_crawl_jobs_domain", "domain"))

@@ -8,9 +8,11 @@ import com.readerapp.data.db.Chapter
 import com.readerapp.data.db.Novel
 import com.readerapp.data.repo.ChapterRepository
 import com.readerapp.data.repo.NovelRepository
-import com.readerapp.data.settings.ReaderPrefsRepository
+import com.readerapp.offline.DownloadProgress
+import com.readerapp.offline.DownloadScheduler
+import com.readerapp.offline.DownloadWorker
+import com.readerapp.offline.OfflineDownloads
 import com.readerapp.scrape.ChapterFetcher
-import com.readerapp.scrape.PrefetchScheduler
 import com.readerapp.scrape.RecheckOutcome
 import com.readerapp.ui.nav.NovelRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -32,9 +34,9 @@ class NovelDetailViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val novels: NovelRepository,
     private val chapterRepo: ChapterRepository,
-    private val prefs: ReaderPrefsRepository,
-    private val prefetch: PrefetchScheduler,
     private val toc: TocImporter,
+    private val offline: OfflineDownloads,
+    private val downloads: DownloadScheduler,
     private val aiSettings: AiSettings,
     private val processScheduler: ProcessScheduler,
     private val fetcher: ChapterFetcher,
@@ -90,7 +92,10 @@ class NovelDetailViewModel @Inject constructor(
         _refreshing.value = true
         viewModelScope.launch {
             try {
-                _message.value = when (val r = toc.import(novelId)) {
+                offline.joined(novelId)
+                val result = toc.import(novelId)
+                offline.afterToc(novelId, result)
+                _message.value = when (val r = result) {
                     is TocResult.Imported -> "Chapter list updated: ${r.total} chapters (${r.added} new)."
                     TocResult.NoAdapter -> "No site adapter for this domain yet. It is created in the background after the first import."
                     TocResult.NoTocSpec -> "This site's adapter has no table-of-contents selectors."
@@ -107,6 +112,7 @@ class NovelDetailViewModel @Inject constructor(
     fun saveAiSettings(mode: AutoProcessMode, targetLanguage: String, sonnet: Boolean, sourceLanguage: String) {
         viewModelScope.launch {
             novels.setAiSettings(novelId, mode, targetLanguage, sonnet, sourceLanguage)
+            offline.joined(novelId)
             // Start the queue right away from the reading position.
             if (mode != AutoProcessMode.OFF) {
                 val n = novels.get(novelId)
@@ -125,12 +131,23 @@ class NovelDetailViewModel @Inject constructor(
         }
     }
 
-    /** Queue a background download of the chapters after the last fetched one. */
-    fun downloadAhead() {
+    /** Progress of this novel's background download; null when none is queued or running. */
+    val download: StateFlow<DownloadProgress?> = downloads.observe(novelId)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** Queues the download of the next [count] chapters after the reading position ([DownloadWorker.ALL] = all remaining). */
+    fun downloadForOffline(count: Int) {
         viewModelScope.launch {
-            val list = chapters.value
-            val anchor = list.lastOrNull { it.status == com.readerapp.data.db.ChapterStatus.FETCHED } ?: return@launch
-            prefetch.schedule(novelId, anchor.id, prefs.current().prefetchCount.coerceAtLeast(5))
+            // Using a hidden "from search" novel makes it a library novel, so the 14-day cleanup never takes it.
+            offline.joined(novelId)
+            downloads.enqueue(novelId, count)
         }
     }
+
+    /** "Add to library" for a hidden novel opened from search results. */
+    fun addToLibrary() {
+        viewModelScope.launch { offline.joined(novelId) }
+    }
+
+    fun cancelDownload() = downloads.cancel(novelId)
 }

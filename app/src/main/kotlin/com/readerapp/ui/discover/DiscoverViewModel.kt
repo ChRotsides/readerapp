@@ -3,6 +3,7 @@ package com.readerapp.ui.discover
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.readerapp.data.db.Novel
+import com.readerapp.offline.SearchResultPrefetch
 import com.readerapp.search.DiscoveryApi
 import com.readerapp.search.LibraryMatch
 import com.readerapp.search.LibrarySource
@@ -76,12 +77,16 @@ data class DiscoverUiState(
     val library: List<Novel> = emptyList(),
     /** workId -> library novel id. */
     val inLibrary: Map<String, Long> = emptyMap(),
+    /** workId -> hidden novel whose opening chapters were saved by search prefetch (readable offline). */
+    val saved: Map<String, Long> = emptyMap(),
+    val savedNovels: List<Novel> = emptyList(),
 )
 
 @HiltViewModel
 class DiscoverViewModel @Inject constructor(
     private val api: DiscoveryApi,
     librarySource: LibrarySource,
+    private val prefetch: SearchResultPrefetch,
 ) : ViewModel() {
     private val _state = MutableStateFlow(DiscoverUiState())
     val state: StateFlow<DiscoverUiState> = _state.asStateFlow()
@@ -91,6 +96,11 @@ class DiscoverViewModel @Inject constructor(
         viewModelScope.launch {
             librarySource.novels().collect { lib ->
                 _state.update { s -> s.copy(library = lib, inLibrary = LibraryMatch.matches(s.results.orEmpty(), lib)) }
+            }
+        }
+        viewModelScope.launch {
+            librarySource.savedFromSearch().collect { hidden ->
+                _state.update { s -> s.copy(savedNovels = hidden, saved = LibraryMatch.matches(s.results.orEmpty(), hidden)) }
             }
         }
     }
@@ -135,8 +145,9 @@ class DiscoverViewModel @Inject constructor(
             val works = api.searchTitle(q)
             _state.update { s ->
                 s.copy(loading = false, results = works, query = null, searchedDescription = null, reranked = false, notes = emptyList(),
-                    inLibrary = LibraryMatch.matches(works, s.library))
+                    inLibrary = LibraryMatch.matches(works, s.library), saved = LibraryMatch.matches(works, s.savedNovels))
             }
+            prefetch.onResults(works)
         }
     }
 
@@ -144,8 +155,9 @@ class DiscoverViewModel @Inject constructor(
         val r = call()
         _state.update { s ->
             s.copy(loading = false, results = r.results, query = EditableQuery.from(r), reranked = r.reranked, notes = r.notes,
-                inLibrary = LibraryMatch.matches(r.results, s.library))
+                inLibrary = LibraryMatch.matches(r.results, s.library), saved = LibraryMatch.matches(r.results, s.savedNovels))
         }
+        prefetch.onResults(r.results)
     }
 
     private fun launchLoading(block: suspend () -> Unit) {

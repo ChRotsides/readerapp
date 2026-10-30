@@ -30,7 +30,7 @@ class FakeEmbedder:
         self.dim = dim
         self.calls: list[tuple[str, int]] = []
 
-    async def embed(self, texts, input_type, purpose="embed"):
+    async def embed(self, texts, input_type, purpose="embed", patient=True):
         self.calls.append((input_type, len(texts)))
         return [self._vec(t) for t in texts]
 

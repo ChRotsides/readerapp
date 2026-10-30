@@ -40,6 +40,7 @@ class Services:
     embedder: Embedder | None
     llm: LLM | None
     verdicts: VerdictProvider | None
+    jev: JevClient | None = None  # also used directly by the link-crawl decisions
 
 
 def build_services(settings: Settings | None = None) -> Services:
@@ -57,7 +58,7 @@ def build_services(settings: Settings | None = None) -> Services:
         llm = None
     jev = JevClient(settings, spend) if settings.jev_api_key else None
     verdicts = CompositeVerdict(settings, jev, llm) if (jev or llm) else None
-    return Services(settings, maker, spend, embedder, llm, verdicts)
+    return Services(settings, maker, spend, embedder, llm, verdicts, jev)
 
 
 def source_names() -> list[str]:

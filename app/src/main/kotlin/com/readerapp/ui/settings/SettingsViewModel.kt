@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.readerapp.ai.UsageRepository
 import com.readerapp.data.settings.AiSettings
+import com.readerapp.data.settings.LibraryOptions
+import com.readerapp.data.settings.LibrarySettings
 import com.readerapp.data.settings.ReaderPrefs
 import com.readerapp.data.settings.ReaderPrefsRepository
 import com.readerapp.data.settings.SecretKeyName
@@ -25,6 +27,7 @@ class SettingsViewModel @Inject constructor(
     private val secure: SecureSettings,
     private val prefsRepo: ReaderPrefsRepository,
     private val aiSettings: AiSettings,
+    private val librarySettings: LibrarySettings,
     usage: UsageRepository,
     private val resume: com.readerapp.ai.resume.SpendResumeScheduler,
     private val discovery: com.readerapp.search.DiscoveryApi,
@@ -59,6 +62,14 @@ class SettingsViewModel @Inject constructor(
 
     val secrets: StateFlow<Secrets> = secure.secrets
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), Secrets())
+
+    val library: StateFlow<LibraryOptions> = librarySettings.options
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), LibraryOptions())
+
+    fun setUploadChapters(on: Boolean) { viewModelScope.launch { librarySettings.setUploadChapters(on) } }
+    fun setDownloadWholeOnAdd(on: Boolean) { viewModelScope.launch { librarySettings.setDownloadWholeOnAdd(on) } }
+    fun setSearchPrefetchResults(n: Int) { viewModelScope.launch { librarySettings.setSearchPrefetchResults(n) } }
+    fun setSearchPrefetchChapters(n: Int) { viewModelScope.launch { librarySettings.setSearchPrefetchChapters(n) } }
 
     val prefs: StateFlow<ReaderPrefs> = prefsRepo.prefs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ReaderPrefs())

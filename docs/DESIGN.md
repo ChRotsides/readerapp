@@ -115,8 +115,8 @@ If a site deliberately obfuscates text, do not try to defeat it.
 - Every link stores method + confidence; merges are reversible (unlink, no data loss). Re-crawls run the same pipeline.
 - Search results are grouped by `Work`.
 - Per catalog novel store **metadata only**: title, author, synopsis, tags, genres, rating, a few review snippets, source URL
-  → embedded as the novel profile. Optionally embed the first 2–3 **free** chapters as vectors only (text discarded after
-  embedding). Never paid/locked chapters. Full chunks only for novels in the user's own library.
+  → embedded as the novel profile. Optionally embed the first 2–3 **free** chapters and store their exact input chunks
+  alongside the vectors. Never paid/locked chapters. Library chapter chunks use the same storage pipeline.
 - Respect robots.txt and site terms, low request rate, cache, back off on blocks; if a site actively blocks the crawler,
   don't evade it — drop to metadata the user imports manually.
 - HyDE matches on two levels: Claude-written hypothetical **scenes** → sample-chapter vectors, and a Claude-written

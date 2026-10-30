@@ -71,6 +71,7 @@ class ReaderViewModel @Inject constructor(
     private val resolver: ChapterTextResolver,
     private val processScheduler: ProcessScheduler,
     private val aiSettings: AiSettings,
+    private val joinHook: com.readerapp.offline.NovelJoinHook,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<ReaderUiState>(ReaderUiState.Loading)
@@ -138,6 +139,8 @@ class ReaderViewModel @Inject constructor(
             val fresh = chapters.get(chapterId) ?: chapter
             val paragraphs = text?.paragraphs.orEmpty()
             val novel = novels.get(fresh.novelId)
+            // Reading a hidden "from search" novel makes it a library novel.
+            if (novel != null && !novel.inLibrary) joinHook.joined(novel.id)
             val mode = novel?.autoProcess ?: AutoProcessMode.OFF
             val target = novel?.targetLanguage?.takeIf { it.isNotBlank() } ?: aiSettings.currentTargetLanguage()
             val canTranslate = paragraphs.isNotEmpty() &&

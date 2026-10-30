@@ -35,6 +35,7 @@ object AppModule {
     @Provides fun adapterDao(db: AppDatabase) = db.adapterDao()
     @Provides fun domainStateDao(db: AppDatabase) = db.domainStateDao()
     @Provides fun aiUsageDao(db: AppDatabase) = db.aiUsageDao()
+    @Provides fun uploadedChapterDao(db: AppDatabase) = db.uploadedChapterDao()
 
     @Provides
     @Singleton

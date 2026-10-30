@@ -3,6 +3,7 @@ package com.readerapp.ui.discover
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.readerapp.offline.NovelJoinHook
 import com.readerapp.search.DiscoveryApi
 import com.readerapp.search.LibraryMatch
 import com.readerapp.search.LibrarySource
@@ -32,6 +33,8 @@ data class WorkUiState(
     val work: Work? = null,
     val error: String? = null,
     val libraryNovelId: Long? = null,
+    /** A hidden novel with this work's opening chapters already saved on the device (readable offline). */
+    val savedNovelId: Long? = null,
     /** URL currently being added, if any. */
     val importingUrl: String? = null,
     val event: WorkEvent? = null,
@@ -43,11 +46,13 @@ class WorkViewModel @Inject constructor(
     private val api: DiscoveryApi,
     private val library: LibrarySource,
     private val importer: NovelPageImporter,
+    private val joinHook: NovelJoinHook,
 ) : ViewModel() {
     private val workId: String = savedStateHandle.get<String>("workId").orEmpty()
     private val _state = MutableStateFlow(WorkUiState())
     val state: StateFlow<WorkUiState> = _state.asStateFlow()
     private var novels: List<com.readerapp.data.db.Novel> = emptyList()
+    private var saved: List<com.readerapp.data.db.Novel> = emptyList()
 
     init {
         load()
@@ -57,6 +62,12 @@ class WorkViewModel @Inject constructor(
                 _state.update { s -> s.copy(libraryNovelId = s.work?.let { LibraryMatch.find(it, lib)?.id }) }
             }
         }
+        viewModelScope.launch {
+            library.savedFromSearch().collect { hidden ->
+                saved = hidden
+                _state.update { s -> s.copy(savedNovelId = s.work?.let { LibraryMatch.find(it, hidden)?.id }) }
+            }
+        }
     }
 
     fun load() {
@@ -64,7 +75,10 @@ class WorkViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 val work = api.work(workId)
-                _state.update { it.copy(loading = false, work = work, libraryNovelId = LibraryMatch.find(work, novels)?.id) }
+                _state.update {
+                    it.copy(loading = false, work = work, libraryNovelId = LibraryMatch.find(work, novels)?.id,
+                        savedNovelId = LibraryMatch.find(work, saved)?.id)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: SearchException) {
@@ -87,8 +101,9 @@ class WorkViewModel @Inject constructor(
                         synopsis = work.synopsis, language = work.language,
                     ),
                 )) {
-                    is NovelPageImport.AlreadyInLibrary -> WorkEvent.OpenNovel(r.novelId)
-                    is NovelPageImport.Imported -> WorkEvent.OpenNovel(r.novelId)
+                    // A hidden "from search" novel joins the library here; "download whole novel" applies to new ones.
+                    is NovelPageImport.AlreadyInLibrary -> { joinHook.joined(r.novelId); WorkEvent.OpenNovel(r.novelId) }
+                    is NovelPageImport.Imported -> { joinHook.joined(r.novelId); WorkEvent.OpenNovel(r.novelId) }
                     is NovelPageImport.NeedsChapter -> WorkEvent.OpenBrowser(
                         r.browserUrl,
                         "${r.reason} Open chapter 1, then choose Add to library in the browser.",

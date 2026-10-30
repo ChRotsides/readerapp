@@ -42,6 +42,13 @@ data class Novel(
     val targetLanguage: String? = null,
     /** Translate with Sonnet (quality) instead of Haiku. */
     @ColumnInfo(defaultValue = "0") val translateWithSonnet: Boolean = false,
+    /**
+     * False = a hidden "from search" novel (opening chapters saved after a discovery search): not shown in the library
+     * until the user adds or starts reading it, and deleted after [com.readerapp.offline.SearchRetention.MAX_AGE_DAYS].
+     */
+    @ColumnInfo(defaultValue = "1") val inLibrary: Boolean = true,
+    /** "Download whole novel when added" applied to this novel: new chapters found by a TOC refresh are downloaded too. */
+    @ColumnInfo(defaultValue = "0") val downloadAll: Boolean = false,
 )
 
 @Entity(
@@ -92,6 +99,35 @@ data class ChapterText(
     val model: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
 )
+
+/** What was last sent to the discovery server's search index for a chapter (see [com.readerapp.sync.LibraryUploader]). */
+@Entity(
+    tableName = "uploaded_chapters",
+    foreignKeys = [
+        ForeignKey(
+            entity = Chapter::class,
+            parentColumns = ["id"],
+            childColumns = ["chapterId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+)
+data class UploadedChapter(
+    @PrimaryKey val chapterId: Long,
+    /** SHA-256 of the uploaded index/title/url/text (or [REJECTED_PREFIX] + that hash when the server refused it). */
+    val hash: String,
+    /** When the text was read for that upload; texts created later are re-checked. */
+    val uploadedAt: Long,
+    /** Position, title and URL as uploaded: a change in any of them (TOC re-index) makes the chapter pending again. */
+    val chapterIndex: Int,
+    val title: String,
+    val url: String,
+) {
+    companion object {
+        /** Marks content the server permanently rejected (422); skipped until the content changes. */
+        const val REJECTED_PREFIX = "rejected:"
+    }
+}
 
 @Entity(
     tableName = "glossary_entries",

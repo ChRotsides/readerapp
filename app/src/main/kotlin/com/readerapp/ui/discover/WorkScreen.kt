@@ -92,6 +92,9 @@ fun WorkScreen(
                         if (work.authors.isNotEmpty()) Text(work.authors.joinToString(", "), style = MaterialTheme.typography.bodyMedium)
                         Text(facts(work), style = MaterialTheme.typography.bodySmall)
                         s.libraryNovelId?.let { id -> AssistChip(onClick = { onOpenNovel(id) }, label = { Text("In library") }) }
+                        if (s.libraryNovelId == null) {
+                            s.savedNovelId?.let { id -> AssistChip(onClick = { onOpenNovel(id) }, label = { Text("Opening chapters saved - read offline") }) }
+                        }
                     }
                 }
                 if (work.aliases.isNotEmpty()) Text("Also known as: " + work.aliases.joinToString(" / "), style = MaterialTheme.typography.bodySmall)

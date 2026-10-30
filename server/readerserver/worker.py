@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from .crawl.runner import CrawlRunner
+from .linkcrawl.crawler import LinkCrawler
 from .models import CrawlState
 from .resolution.resolver import Resolver, seed_tags
 from .services import Services, build_services, build_source, source_names
@@ -32,6 +33,20 @@ async def run_source(sv: Services, runner: CrawlRunner, name: str, max_items: in
             http = getattr(source, attr, None)
             if http:
                 await http.aclose()
+
+
+def make_link_crawler(sv: Services, runner: CrawlRunner) -> LinkCrawler:
+    return LinkCrawler(sv.maker, sv.settings, sv.embedder, sv.llm, sv.jev, runner)
+
+
+async def link_loop(crawler: LinkCrawler, poll_seconds: float = 10.0) -> None:
+    """Runs user-submitted link-crawl jobs (queued, or running with an expired lease) alongside the source scheduler."""
+    while True:
+        try:
+            await crawler.run_due()
+        except Exception:
+            log.exception("link crawl iteration failed")
+        await asyncio.sleep(poll_seconds)
 
 
 async def due_sources(sv: Services) -> list[str]:
@@ -63,6 +78,7 @@ async def loop(poll_seconds: float = 30.0) -> None:
     runner = make_runner(sv)
     async with sv.maker() as s:
         await seed_tags(s)
+    link_task = asyncio.create_task(link_loop(make_link_crawler(sv, runner)))  # noqa: F841 (kept alive for the process lifetime)
     while True:
         try:
             for name in await due_sources(sv):

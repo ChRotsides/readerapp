@@ -52,6 +52,14 @@ class TocImporter @Inject constructor(
     private val adapters: AdapterStore,
     private val pages: PageSource,
 ) {
+    /** True when [domain] has an ACTIVE JSON adapter with usable TOC selectors, i.e. [import] can list a novel's chapters. */
+    suspend fun supports(domain: String): Boolean {
+        val adapter = adapters.activeFor(domain) ?: return false
+        if (adapter.kind != AdapterKind.JSON) return false
+        val spec = runCatching { JsonAdapterSpec.parse(adapter.code) }.getOrNull() ?: return false
+        return spec.validate().isEmpty() && spec.toc != null
+    }
+
     suspend fun import(novelId: Long, maxPages: Int = MAX_PAGES): TocResult {
         val novel = store.novel(novelId) ?: return TocResult.NoNovelPage
         val adapter = adapters.activeFor(novel.domain) ?: return TocResult.NoAdapter

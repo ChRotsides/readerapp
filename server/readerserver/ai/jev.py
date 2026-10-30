@@ -55,27 +55,32 @@ class JevClient:
     def available(self) -> bool:
         return bool(self.settings.jev_api_key)
 
-    async def ask(self, a: dict, b: dict) -> MatchVerdict:
-        async with self.spend.reserve(self.settings.jev_price_per_call, "verdict") as reservation:
+    async def choose(self, key: str, instructions: str, criteria: dict[str, str], state: dict, purpose: str) -> tuple[str, float, dict[str, float]]:
+        """One `choice` question -> (choice, probability of that choice, all probabilities)."""
+        async with self.spend.reserve(self.settings.jev_price_per_call, purpose) as reservation:
             resp = await self.http.post(
                 f"{self.settings.jev_base_url.rstrip('/')}/v1/systemone",
                 headers={"Authorization": f"Bearer {self.settings.jev_api_key}"},
                 json={
                     "model": self.settings.jev_model,
-                    "state": {"record_a": a, "record_b": b},
-                    "questions": {"match": {"type": "choice", "instructions": INSTRUCTIONS, "criteria": CRITERIA}},
+                    "state": state,
+                    "questions": {key: {"type": "choice", "instructions": instructions, "criteria": criteria}},
                 },
             )
             resp.raise_for_status()
             data = resp.json()
-            ans = data["answers"]["match"]
+            ans = data["answers"][key]
             probs = {k: float(v) for k, v in (ans.get("probabilities") or {}).items()}
             choice = ans["choice"]
             usage = data.get("usage") or {}
-            await reservation.settle("jev", data.get("model", self.settings.jev_model), "verdict",
+            await reservation.settle("jev", data.get("model", self.settings.jev_model), purpose,
                                      int(usage.get("input_tokens", 0)), int(usage.get("output_tokens", 0)),
                                      self.settings.jev_price_per_call)
-        return MatchVerdict(choice, probs.get(choice, float(ans.get("confidence", 0))), "jev", probs)
+        return choice, probs.get(choice, float(ans.get("confidence", 0))), probs
+
+    async def ask(self, a: dict, b: dict) -> MatchVerdict:
+        choice, p, probs = await self.choose("match", INSTRUCTIONS, CRITERIA, {"record_a": a, "record_b": b}, "verdict")
+        return MatchVerdict(choice, p, "jev", probs)
 
 
 class CompositeVerdict:

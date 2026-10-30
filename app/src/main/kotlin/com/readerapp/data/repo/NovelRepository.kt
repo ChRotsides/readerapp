@@ -21,7 +21,27 @@ class NovelRepository @Inject constructor(private val dao: NovelDao) {
 
     suspend fun findByDomainAndUrl(domain: String, url: String): Novel? = dao.findByDomainAndUrl(domain, url)
 
+    /** The library (hidden "from search" novels excluded). */
     fun observeAll(): Flow<List<Novel>> = dao.observeAll()
+
+    fun observeHidden(): Flow<List<Novel>> = dao.observeHidden()
+
+    suspend fun hidden(): List<Novel> = dao.hidden()
+
+    /** Every novel including hidden ones. */
+    suspend fun all(): List<Novel> = dao.all()
+
+    suspend fun withCopy(): List<Novel> = dao.withCopy()
+
+    suspend fun deleteIfHidden(id: Long): Boolean = dao.deleteIfHidden(id) > 0
+
+    suspend fun deleteIfStale(id: Long, cutoff: Long): Boolean = dao.deleteIfStale(id, cutoff) > 0
+
+    fun observeLibrarySize(): Flow<Int> = dao.observeLibrarySize()
+
+    suspend fun setInLibrary(id: Long, inLibrary: Boolean) = dao.setInLibrary(id, inLibrary)
+
+    suspend fun setDownloadAll(id: Long, downloadAll: Boolean) = dao.setDownloadAll(id, downloadAll)
 
     suspend fun create(novel: Novel): Long = dao.insert(novel)
 

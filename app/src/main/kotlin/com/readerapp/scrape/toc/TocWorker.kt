@@ -24,11 +24,14 @@ class TocWorker @AssistedInject constructor(
     @Assisted context: Context,
     @Assisted params: WorkerParameters,
     private val importer: TocImporter,
+    private val offline: com.readerapp.offline.OfflineDownloads,
 ) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val novelId = inputData.getLong(KEY_NOVEL_ID, -1)
         if (novelId < 0) return Result.failure()
-        return when (importer.import(novelId)) {
+        val result = importer.import(novelId)
+        offline.afterToc(novelId, result)
+        return when (result) {
             is TocResult.FetchFailed, is TocResult.Incomplete -> if (runAttemptCount < 4) Result.retry() else Result.success()
             else -> Result.success()
         }

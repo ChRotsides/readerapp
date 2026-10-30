@@ -1,5 +1,5 @@
 """Indexing: synopsis embeddings (for ER kNN), work profile embeddings, sample-chapter chunk vectors.
-Chapter text is embedded and discarded; only vectors are stored."""
+Chapter chunks are stored alongside their vectors."""
 import hashlib
 import logging
 import re
@@ -39,8 +39,12 @@ def synopsis_input(r: SourceRecord) -> str:
     return f"{r.title}\n{r.synopsis}"
 
 
-def chunk_text(text: str, target: int = CHUNK_TARGET_TOKENS, hard_max: int = CHUNK_MAX_TOKENS) -> list[str]:
-    """Paragraph-aligned chunks of ~target tokens (never above hard_max; oversize paragraphs split by sentence)."""
+def legacy_chunk_text(text: str, target: int = 700, hard_max: int = 1000) -> list[str]:
+    """Frozen pre-text-storage chunker, used to reconstruct legacy chapter inputs.
+
+    Keep this implementation and its defaults unchanged when evolving chunk_text.
+    Its sentence splitting could leave oversized chunks; those cannot be backfilled safely.
+    """
     paras = [p.strip() for p in re.split(r"\n\s*\n|\r\n\s*\r\n", text) if p.strip()]
     if len(paras) <= 1:
         paras = [p.strip() for p in text.split("\n") if p.strip()]
@@ -61,6 +65,53 @@ def chunk_text(text: str, target: int = CHUNK_TARGET_TOKENS, hard_max: int = CHU
     if cur:
         chunks.append("\n".join(cur))
     return chunks
+
+
+def chunk_text(text: str, target: int = CHUNK_TARGET_TOKENS, hard_max: int = CHUNK_MAX_TOKENS) -> list[str]:
+    """Paragraph/sentence aligned chunks, splitting unbroken oversized sentences as well."""
+    if target < 1 or hard_max < 1:
+        raise ValueError("Chunk token limits must be positive")
+    chunks = legacy_chunk_text(text, target, hard_max)
+    out = []
+    for chunk in chunks:
+        # A UTF-8 byte bound also keeps unusual scripts safely below the provider context limit.
+        while approx_tokens(chunk) > hard_max or len(chunk.encode()) > hard_max * 4:
+            end = min(len(chunk), hard_max)
+            while approx_tokens(chunk[:end]) > hard_max or len(chunk[:end].encode()) > hard_max * 4:
+                end //= 2
+            out.append(chunk[:end])
+            chunk = chunk[end:]
+        if chunk:
+            out.append(chunk)
+    return out
+
+
+def matching_chunk_inputs(rows: list[SampleEmbedding], chunks: list[str], model: str) -> bool:
+    """Exact stored text is the only safe match for inputs without a chapter hash."""
+    return bool(rows) and len(rows) == len(chunks) and all(
+        row.chunk_index == i and row.model == model and row.chunk_text == chunk
+        for i, (row, chunk) in enumerate(zip(rows, chunks, strict=True))
+    )
+
+
+def backfill_chunk_inputs(rows: list[SampleEmbedding], chunks: list[str], digest: str, model: str) -> bool:
+    """Validate the complete frozen legacy layout before assigning any missing text.
+
+    Small byte-bounded inputs could not have hit Voyage's 32k truncation limit.
+    A source hash, contiguous indices and token counts are all required. Never
+    infer input identity from indices or token counts alone.
+    """
+    if not rows or len(rows) != len(chunks):
+        return False
+    for i, (row, chunk) in enumerate(zip(rows, chunks, strict=True)):
+        if (row.chapter_hash != digest or row.model != model or row.chunk_index != i
+                or row.token_count != approx_tokens(chunk) or len(chunk.encode()) > 4000
+                or (row.chunk_text is not None and row.chunk_text != chunk)):
+            return False
+    for row, chunk in zip(rows, chunks, strict=True):
+        if row.chunk_text is None:
+            row.chunk_text = chunk
+    return True
 
 
 async def embed_synopses(session: AsyncSession, embedder: Embedder, limit: int = 256) -> int:
@@ -141,7 +192,7 @@ async def index_profiles(session: AsyncSession, embedder: Embedder, settings: Se
 
 
 async def index_sample_text(session: AsyncSession, embedder: Embedder, settings: Settings, rec: SourceRecord, chapters: list[str]) -> int:
-    """Chunk -> embed -> store vectors only. `chapters` text goes out of scope after this call (never persisted)."""
+    """Store catalog sample chunks and vectors, reusing only exactly matched inputs."""
     chunks: list[str] = []
     for ch in chapters:
         chunks.extend(chunk_text(ch))
@@ -149,10 +200,20 @@ async def index_sample_text(session: AsyncSession, embedder: Embedder, settings:
         rec.samples_done = True
         await session.commit()
         return 0
+    cond = (SampleEmbedding.source_record_id == rec.id, SampleEmbedding.chapter_index.is_(None))
+    stored = list((await session.scalars(select(SampleEmbedding).where(*cond).order_by(SampleEmbedding.chunk_index))).all())
+    if matching_chunk_inputs(stored, chunks, settings.voyage_model):
+        rec.samples_done = True
+        await session.commit()
+        return 0
+    # Legacy catalog samples have no source hash: indices/token counts alone cannot prove a match.
     vecs = await embedder.embed(chunks, "document", "sample")
-    await session.execute(delete(SampleEmbedding).where(SampleEmbedding.source_record_id == rec.id))
+    if len(vecs) != len(chunks):
+        raise ValueError("Embedding count does not match chunk count")
+    await session.execute(delete(SampleEmbedding).where(
+        SampleEmbedding.source_record_id == rec.id, SampleEmbedding.chapter_index.is_(None)))  # chapter embeddings are kept
     for i, (c, v) in enumerate(zip(chunks, vecs, strict=True)):
-        session.add(SampleEmbedding(source_record_id=rec.id, chunk_index=i, token_count=approx_tokens(c), model=settings.voyage_model, embedding=v))
+        session.add(SampleEmbedding(source_record_id=rec.id, chunk_index=i, chunk_text=c, token_count=approx_tokens(c), model=settings.voyage_model, embedding=v))
     rec.samples_done = True
     await session.commit()
     return len(chunks)

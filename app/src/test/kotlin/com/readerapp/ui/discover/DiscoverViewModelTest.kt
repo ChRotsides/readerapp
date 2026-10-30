@@ -3,6 +3,10 @@ package com.readerapp.ui.discover
 import androidx.lifecycle.SavedStateHandle
 import com.readerapp.data.db.Novel
 import com.readerapp.search.ConnectionResult
+import com.readerapp.search.CrawlJob
+import com.readerapp.search.CrawlRequest
+import com.readerapp.search.LibraryUploadRequest
+import com.readerapp.search.LibraryUploadResult
 import com.readerapp.search.DiscoveryApi
 import com.readerapp.search.NovelPageImporter
 import com.readerapp.search.NovelPageStore
@@ -42,6 +46,8 @@ class DiscoverViewModelTest {
         filters = SearchFilters(language = "ko", minChapters = 100, excludeTags = listOf("harem")), reranked = true,
     )
 
+    private val noPrefetch = com.readerapp.offline.SearchResultPrefetch { }
+
     private class FakeApi : DiscoveryApi {
         val requests = mutableListOf<SearchRequest>()
         var gate: CompletableDeferred<Unit>? = null
@@ -52,12 +58,18 @@ class DiscoverViewModelTest {
         override suspend fun work(workId: String) = workResult()
         override suspend fun searchTitle(query: String, limit: Int) = titleResults
         override suspend fun testConnection() = ConnectionResult.NotConfigured
+        override suspend fun startCrawl(request: CrawlRequest): CrawlJob = throw UnsupportedOperationException()
+        override suspend fun crawlJobs(): List<CrawlJob> = emptyList()
+        override suspend fun pauseCrawl(id: Long): CrawlJob = throw UnsupportedOperationException()
+        override suspend fun resumeCrawl(id: Long): CrawlJob = throw UnsupportedOperationException()
+        override suspend fun cancelCrawl(id: Long): CrawlJob = throw UnsupportedOperationException()
+        override suspend fun uploadLibraryChapters(request: LibraryUploadRequest) = LibraryUploadResult()
     }
 
     @Test fun loadingThenResultsWithEditableQueryAndLibraryBadge() = runTest {
         val api = FakeApi().apply { next = { response }; gate = CompletableDeferred() }
         val lib = Novel(id = 9, title = "Book", sourceUrl = "https://royalroad.com/c/1", domain = "royalroad.com")
-        val vm = DiscoverViewModel(api, { flowOf(listOf(lib)) })
+        val vm = DiscoverViewModel(api, { flowOf(listOf(lib)) }, noPrefetch)
         vm.setDescription(" dark mystery ")
         vm.search()
         assertTrue(vm.state.value.loading)
@@ -72,7 +84,7 @@ class DiscoverViewModelTest {
 
     @Test fun errorsSurfaceAndClear() = runTest {
         val api = FakeApi().apply { next = { throw SearchException.BudgetReached(null) } }
-        val vm = DiscoverViewModel(api, { flowOf(emptyList()) })
+        val vm = DiscoverViewModel(api, { flowOf(emptyList()) }, noPrefetch)
         vm.setDescription("x"); vm.search()
         assertTrue(vm.state.value.error!!.contains("budget"))
         assertFalse(vm.state.value.loading)
@@ -84,7 +96,7 @@ class DiscoverViewModelTest {
 
     @Test fun editAndSearchAgainSendsEditedPartsWithOriginalDescription() = runTest {
         val api = FakeApi().apply { next = { response } }
-        val vm = DiscoverViewModel(api, { flowOf(emptyList()) })
+        val vm = DiscoverViewModel(api, { flowOf(emptyList()) }, noPrefetch)
         vm.setDescription("original"); vm.search()
         vm.setDescription("changed box text after search")
         vm.editQuery { copy(scenes = listOf("edited scene", "  ", "s2"), synopsis = "new syn", tags = "x, y ,", language = "", excludeTags = "gore, harem") }
@@ -100,7 +112,7 @@ class DiscoverViewModelTest {
 
     @Test fun titleSearchShowsResultsWithoutEditableQuery() = runTest {
         val api = FakeApi().apply { titleResults = listOf(work) }
-        val vm = DiscoverViewModel(api, { flowOf(emptyList()) })
+        val vm = DiscoverViewModel(api, { flowOf(emptyList()) }, noPrefetch)
         vm.setMode(DiscoverMode.TITLE); vm.setTitleQuery("boo"); vm.searchTitle()
         assertEquals(listOf(work), vm.state.value.results)
         assertNull(vm.state.value.query)
@@ -109,7 +121,7 @@ class DiscoverViewModelTest {
     @Test fun libraryChangesUpdateBadgesLive() = runTest {
         val api = FakeApi().apply { next = { response } }
         val lib = MutableStateFlow(emptyList<Novel>())
-        val vm = DiscoverViewModel(api) { lib }
+        val vm = DiscoverViewModel(api, { lib }, noPrefetch)
         vm.setDescription("x"); vm.search()
         assertTrue(vm.state.value.inLibrary.isEmpty())
         lib.value = listOf(Novel(id = 4, title = "Book", sourceUrl = "https://royalroad.com/fiction/1", domain = "royalroad.com"))
@@ -124,7 +136,7 @@ class DiscoverViewModelTest {
             override suspend fun create(novel: Novel): Long { created += novel; return 11 }
         }
         val importer = NovelPageImporter(store, { TocResult.NoAdapter })
-        val vm = WorkViewModel(SavedStateHandle(mapOf("workId" to "w1")), api, { flowOf(emptyList()) }, importer)
+        val vm = WorkViewModel(SavedStateHandle(mapOf("workId" to "w1")), api, { flowOf(emptyList()) }, importer, {})
         assertEquals("Book", vm.state.value.work?.title)
         vm.addToLibrary("https://royalroad.com/fiction/1")
         val ev = vm.state.value.event as WorkEvent.OpenBrowser
@@ -139,7 +151,7 @@ class DiscoverViewModelTest {
             NovelPageImporter(object : NovelPageStore {
                 override suspend fun findExisting(domain: String, url: String, title: String): Novel? = null
                 override suspend fun create(novel: Novel) = 1L
-            }, { TocResult.NoAdapter }))
+            }, { TocResult.NoAdapter }), {})
         assertTrue(vm.state.value.error!!.contains("404"))
     }
 }

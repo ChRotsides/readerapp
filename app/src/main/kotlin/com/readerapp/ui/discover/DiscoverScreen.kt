@@ -18,6 +18,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -58,6 +59,7 @@ fun DiscoverScreen(
     onOpenWork: (String) -> Unit,
     onOpenNovel: (Long) -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenCrawl: () -> Unit,
     viewModel: DiscoverViewModel = hiltViewModel(),
 ) {
     val s by viewModel.state.collectAsStateWithLifecycle()
@@ -66,6 +68,7 @@ fun DiscoverScreen(
             TopAppBar(
                 title = { Text("Discover") },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                actions = { IconButton(onClick = onOpenCrawl) { Icon(Icons.Filled.Public, "Crawl a link") } },
             )
         },
     ) { padding ->
@@ -132,7 +135,7 @@ fun DiscoverScreen(
             if (results != null && !s.loading) {
                 if (results.isEmpty()) item { Text("No matches.") }
                 items(results, key = { it.workId }) { work ->
-                    ResultCard(work, inLibraryId = s.inLibrary[work.workId], onClick = { onOpenWork(work.workId) }, onOpenNovel = onOpenNovel)
+                    ResultCard(work, inLibraryId = s.inLibrary[work.workId], savedId = s.saved[work.workId], onClick = { onOpenWork(work.workId) }, onOpenNovel = onOpenNovel)
                 }
             }
         }
@@ -186,7 +189,7 @@ private fun SearchedFor(q: EditableQuery, enabled: Boolean, onEdit: (EditableQue
 
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-private fun ResultCard(work: Work, inLibraryId: Long?, onClick: () -> Unit, onOpenNovel: (Long) -> Unit) {
+private fun ResultCard(work: Work, inLibraryId: Long?, savedId: Long?, onClick: () -> Unit, onOpenNovel: (Long) -> Unit) {
     var aliasesOpen by remember { mutableStateOf(false) }
     Card(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
         Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -195,6 +198,8 @@ private fun ResultCard(work: Work, inLibraryId: Long?, onClick: () -> Unit, onOp
                 Text(work.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (inLibraryId != null) {
                     AssistChip(onClick = { onOpenNovel(inLibraryId) }, label = { Text("In library") })
+                } else if (savedId != null) {
+                    AssistChip(onClick = { onOpenNovel(savedId) }, label = { Text("Saved offline") })
                 }
                 if (work.aliases.isNotEmpty()) {
                     Text(

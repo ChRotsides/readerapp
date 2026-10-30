@@ -23,7 +23,7 @@ interface NovelDao {
           (SELECT COUNT(*) FROM chapters c WHERE c.novelId = n.id) AS chapterCount,
           (SELECT COUNT(*) FROM chapters c WHERE c.novelId = n.id AND c.`read` = 1) AS readCount,
           (SELECT COUNT(*) FROM chapters c WHERE c.novelId = n.id AND c.status = 'FETCHED') AS fetchedCount
-        FROM novels n ORDER BY n.lastOpenedAt DESC
+        FROM novels n WHERE n.inLibrary = 1 ORDER BY n.lastOpenedAt DESC
         """,
     )
     fun observeLibrary(): Flow<List<NovelWithProgress>>
@@ -40,8 +40,41 @@ interface NovelDao {
     @Query("SELECT * FROM novels WHERE domain = :domain AND (novelUrl = :url OR sourceUrl = :url) LIMIT 1")
     suspend fun findByDomainAndUrl(domain: String, url: String): Novel?
 
-    @Query("SELECT * FROM novels")
+    /** The library: hidden "from search" novels are not included. */
+    @Query("SELECT * FROM novels WHERE inLibrary = 1")
     fun observeAll(): Flow<List<Novel>>
+
+    /** Hidden novels saved by search prefetch that actually have downloaded chapters (readable offline). */
+    @Query("SELECT * FROM novels n WHERE n.inLibrary = 0 AND EXISTS (SELECT 1 FROM chapters c WHERE c.novelId = n.id AND c.status = 'FETCHED')")
+    fun observeHidden(): Flow<List<Novel>>
+
+    /** Novels the device already has a usable copy of: the library plus hidden ones with downloaded chapters. */
+    @Query("SELECT * FROM novels n WHERE n.inLibrary = 1 OR EXISTS (SELECT 1 FROM chapters c WHERE c.novelId = n.id AND c.status = 'FETCHED')")
+    suspend fun withCopy(): List<Novel>
+
+    /** Deletes only while still hidden (the user may have added it meanwhile). Returns rows deleted. */
+    @Query("DELETE FROM novels WHERE id = :id AND inLibrary = 0")
+    suspend fun deleteIfHidden(id: Long): Int
+
+    /** Deletes only while still hidden and neither added nor opened since [cutoff]. */
+    @Query("DELETE FROM novels WHERE id = :id AND inLibrary = 0 AND addedAt < :cutoff AND lastOpenedAt < :cutoff")
+    suspend fun deleteIfStale(id: Long, cutoff: Long): Int
+
+    @Query("SELECT * FROM novels WHERE inLibrary = 0")
+    suspend fun hidden(): List<Novel>
+
+    /** Every novel, hidden ones included (duplicate checks). */
+    @Query("SELECT * FROM novels")
+    suspend fun all(): List<Novel>
+
+    @Query("SELECT COUNT(*) FROM novels WHERE inLibrary = 1")
+    fun observeLibrarySize(): Flow<Int>
+
+    @Query("UPDATE novels SET inLibrary = :inLibrary WHERE id = :id")
+    suspend fun setInLibrary(id: Long, inLibrary: Boolean)
+
+    @Query("UPDATE novels SET downloadAll = :downloadAll WHERE id = :id")
+    suspend fun setDownloadAll(id: Long, downloadAll: Boolean)
 
     @Insert
     suspend fun insert(novel: Novel): Long
@@ -106,6 +139,10 @@ interface ChapterDao {
 
     @Query("SELECT * FROM chapters WHERE novelId = :novelId")
     suspend fun all(novelId: Long): List<Chapter>
+
+    /** How many chapters after the given position are still NOT_FETCHED. */
+    @Query("SELECT COUNT(*) FROM chapters WHERE novelId = :novelId AND status = 'NOT_FETCHED' AND (chapterIndex > :index OR (chapterIndex = :index AND id > :id))")
+    suspend fun unfetchedCountAfter(novelId: Long, index: Int, id: Long): Int
 
     /** Makes room: moves every chapter of the novel at or after [from] [by] places back. (Index is not unique.) */
     @Query("UPDATE chapters SET chapterIndex = chapterIndex + :by WHERE novelId = :novelId AND chapterIndex >= :from")
@@ -179,6 +216,13 @@ interface ChapterTextDao {
 
     @Query("SELECT * FROM chapter_texts WHERE chapterId = :chapterId")
     suspend fun all(chapterId: Long): List<ChapterText>
+
+    @Query("SELECT DISTINCT chapterId FROM chapter_texts")
+    suspend fun chapterIdsWithText(): List<Long>
+
+    /** Changes whenever any text is written (Room re-emits on every write to the table). */
+    @Query("SELECT MAX(createdAt) FROM chapter_texts")
+    fun observeLatestWrite(): Flow<Long?>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(text: ChapterText)
@@ -322,4 +366,31 @@ interface AiUsageDao {
 
     @Query("SELECT COALESCE(SUM(costMicros), 0) FROM ai_usage WHERE createdAt >= :since")
     fun observeCostSince(since: Long): Flow<Long>
+}
+
+@Dao
+interface UploadedChapterDao {
+    @Query("SELECT * FROM uploaded_chapters WHERE chapterId = :chapterId")
+    suspend fun get(chapterId: Long): UploadedChapter?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(rows: List<UploadedChapter>)
+
+    /**
+     * Downloaded chapters of library novels that were never uploaded, whose text was written after the last upload
+     * read, or whose position/title/URL changed since. Only a hint: the uploader compares content hashes before sending.
+     */
+    @Query(
+        """
+        SELECT c.id FROM chapters c
+        JOIN novels n ON n.id = c.novelId
+        LEFT JOIN uploaded_chapters u ON u.chapterId = c.id
+        WHERE n.inLibrary = 1 AND c.status = 'FETCHED'
+          AND (u.chapterId IS NULL
+               OR u.chapterIndex != c.chapterIndex OR u.title != c.title OR u.url != c.url
+               OR u.uploadedAt < (SELECT MAX(t.createdAt) FROM chapter_texts t WHERE t.chapterId = c.id))
+        ORDER BY c.novelId, c.chapterIndex, c.id
+        """,
+    )
+    suspend fun pendingChapterIds(): List<Long>
 }

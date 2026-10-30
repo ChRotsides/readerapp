@@ -132,8 +132,13 @@ order with a `notes` entry; a successful rerank is respected (ids de-duplicated,
 scenes + synopsis skip HyDE (default filters) and work without Claude.
 
 **Embeddings**: Voyage `voyage-4-large` (best multilingual quality, 1024 dims, 32k context), `input_type=document` for
-profiles/chunks and `query` for searches. Chunks are ~700 tokens, vectors only; chapter text is discarded after embedding
-and never stored. HNSW (cosine) indexes on all vector columns; GIN trigram index on titles.
+profiles/chunks and `query` for searches. Chunks are ~700 tokens and stored in `sample_embeddings.chunk_text`
+alongside their vectors. Voyage truncation is disabled so passages represent the full embedding input.
+Run `alembic upgrade head` before deploying this code. Existing rows start with NULL text; when a chapter is
+seen again, its hash and frozen legacy chunk layout allow safe backfilling without calling Voyage. Unverifiable
+layouts (including possibly truncated legacy inputs) are re-embedded. Catalog samples without a source hash
+must be re-embedded when fetched again; exact stored sample inputs can be reused. HNSW (cosine) indexes on all
+vector columns; GIN trigram index on titles.
 
 ## Cost notes
 

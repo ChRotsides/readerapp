@@ -62,4 +62,10 @@ class TextCleanerTest {
         val result = cleaner.removeJunk(listOf("他走进了房间。", "请记住本书首发域名：example.com"))
         assertEquals(listOf("他走进了房间。"), result)
     }
+
+    @Test
+    fun dropsCounterParagraphsButKeepsSentencesWithNumbers() {
+        val paragraphs = listOf("Arrogant! Cruel!", "13", "1.2k", "99+", "He was 13 years old.", "Chapter 2", "2.")
+        assertEquals(listOf("Arrogant! Cruel!", "He was 13 years old.", "Chapter 2", "2."), cleaner.removeJunk(paragraphs))
+    }
 }

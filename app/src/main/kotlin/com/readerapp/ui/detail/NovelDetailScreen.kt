@@ -26,6 +26,12 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.outlined.CloudQueue
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.TextButton
+import com.readerapp.offline.DownloadProgress
+import com.readerapp.offline.DownloadWorker
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.OutlinedTextField
@@ -80,6 +86,7 @@ fun NovelDetailScreen(
     val message by viewModel.message.collectAsStateWithLifecycle()
     val defaultTarget by viewModel.defaultTargetLanguage.collectAsStateWithLifecycle()
     val rechecking by viewModel.rechecking.collectAsStateWithLifecycle()
+    val download by viewModel.download.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(message) { message?.let { snackbar.showSnackbar(it); viewModel.messageShown() } }
 
@@ -125,12 +132,12 @@ fun NovelDetailScreen(
                         enabled = chapters.isNotEmpty(),
                         onClick = { viewModel.continueTarget { id -> if (id != null) onOpenChapter(id) } },
                     ) { Text(if (n.lastReadChapterId != null) "Continue reading" else "Start reading") }
-                    OutlinedButton(onClick = viewModel::downloadAhead, enabled = chapters.isNotEmpty()) {
-                        Icon(Icons.Filled.CloudDownload, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Download ahead")
-                    }
+                    DownloadMenu(enabled = download == null, onChoose = viewModel::downloadForOffline)
                 }
+                if (!n.inLibrary) {
+                    OutlinedButton(onClick = viewModel::addToLibrary, modifier = Modifier.padding(horizontal = 16.dp)) { Text("Add to library") }
+                }
+                download?.let { DownloadStatus(it, onCancel = viewModel::cancelDownload) }
                 OutlinedButton(
                     onClick = viewModel::refreshChapterList,
                     enabled = !refreshing,
@@ -152,6 +159,44 @@ fun NovelDetailScreen(
                     onClick = { onOpenChapter(chapter.id) },
                 )
             }
+        }
+    }
+}
+
+/** "Download for offline": next 50 / next 200 / all remaining chapters after the reading position. */
+@Composable
+private fun DownloadMenu(enabled: Boolean, onChoose: (Int) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        OutlinedButton(onClick = { open = true }, enabled = enabled) {
+            Icon(Icons.Filled.CloudDownload, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Download for offline")
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            listOf("Next 50" to 50, "Next 200" to 200, "All remaining" to DownloadWorker.ALL).forEach { (label, count) ->
+                DropdownMenuItem(text = { Text(label) }, onClick = { open = false; onChoose(count) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadStatus(progress: DownloadProgress, onCancel: () -> Unit) {
+    Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (progress.total > 0) LinearProgressIndicator(progress = { progress.done / progress.total.toFloat() }, modifier = Modifier.fillMaxWidth())
+        else LinearProgressIndicator(Modifier.fillMaxWidth())
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                when {
+                    !progress.running -> "Download queued (waiting for network)"
+                    progress.total > 0 -> "Downloading ${progress.done} / ${progress.total} chapters"
+                    else -> "Preparing download..."
+                },
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onCancel) { Text("Cancel") }
         }
     }
 }

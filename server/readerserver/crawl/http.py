@@ -25,6 +25,10 @@ class BlockedError(Exception):
     """The site actively blocks us (403 / challenge). The caller must stop and record the source as blocked."""
 
 
+class ResponseTooLarge(Exception):
+    """The body exceeded the caller's `max_bytes` cap (the connection is closed without reading the rest)."""
+
+
 class RobotsDisallowed(Exception):
     pass
 
@@ -275,7 +279,9 @@ class PoliteClient:
         for attempt in range(self.max_retries + 1):
             await self._wait_turn(origin)
             try:
-                resp = await self._client.request(method, url, **kw)
+                resp = await self._request_once(method, url, kw)
+            except ResponseTooLarge as e:
+                raise FetchError(f"{url}: {e}") from e
             except httpx.TransportError as e:
                 if attempt == self.max_retries:
                     raise FetchError(f"{url}: {e}") from e
@@ -299,6 +305,32 @@ class PoliteClient:
                 continue
             return resp
         raise FetchError(f"{url}: giving up after retries (last status {last.status_code if last else 'n/a'})")
+
+    async def _request_once(self, method: str, url: str, kw: dict) -> httpx.Response:
+        """One request. With `max_bytes` the body is streamed and read only if the content type is text-like and it stays
+        under the cap (non-text bodies come back empty; oversize ones raise ResponseTooLarge)."""
+        max_bytes = kw.get("max_bytes")
+        kw = {k: v for k, v in kw.items() if k != "max_bytes"}
+        if max_bytes is None:
+            return await self._client.request(method, url, **kw)
+        req = self._client.build_request(method, url, **kw)
+        resp = await self._client.send(req, stream=True)
+        try:
+            # the body is re-wrapped already decoded, so drop the headers that describe the wire encoding
+            headers = httpx.Headers([(k, v) for k, v in resp.headers.multi_items() if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")])
+            ctype = resp.headers.get("content-type", "text/html").lower()
+            if resp.status_code < 300 and not any(t in ctype for t in ("html", "text", "xml", "json")):
+                return httpx.Response(resp.status_code, headers=headers, content=b"", request=req)
+            if int(resp.headers.get("content-length", 0) or 0) > max_bytes:
+                raise ResponseTooLarge(f"body larger than {max_bytes} bytes")
+            data = bytearray()
+            async for chunk in resp.aiter_bytes():
+                data += chunk
+                if len(data) > max_bytes:
+                    raise ResponseTooLarge(f"body larger than {max_bytes} bytes")
+            return httpx.Response(resp.status_code, headers=headers, content=bytes(data), request=req)
+        finally:
+            await resp.aclose()
 
     async def request(self, method: str, url: str, **kw) -> httpx.Response:
         for _ in range(self.max_redirects + 1):

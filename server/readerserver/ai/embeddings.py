@@ -14,7 +14,12 @@ InputType = Literal["query", "document"]
 
 
 class Embedder(Protocol):
-    async def embed(self, texts: list[str], input_type: InputType, purpose: str = "embed") -> list[list[float]]: ...
+    async def embed(self, texts: list[str], input_type: InputType, purpose: str = "embed",
+                    patient: bool = True) -> list[list[float]]: ...
+
+
+class EmbeddingRateLimited(Exception):
+    """Voyage rejected the request for rate limits (3 RPM until a payment method is added)."""
 
 
 class EmbeddingUnavailable(Exception):
@@ -38,6 +43,9 @@ def make_batches(texts: list[str], max_items: int = 128, max_tokens: int = 100_0
     return batches
 
 
+RATE_LIMIT_BACKOFF_S = 25
+
+
 class VoyageEmbedder:
     def __init__(self, settings: Settings, spend: SpendTracker, client=None):
         self.settings = settings
@@ -47,10 +55,13 @@ class VoyageEmbedder:
                 raise EmbeddingUnavailable("VOYAGE_API_KEY not set")
             import voyageai
 
-            client = voyageai.AsyncClient(api_key=settings.voyage_api_key, max_retries=3)
+            # Retries live in embed() (rate limits need long waits); client-level retries would multiply requests.
+            client = voyageai.AsyncClient(api_key=settings.voyage_api_key, max_retries=0)
         self.client = client
 
-    async def embed(self, texts: list[str], input_type: InputType, purpose: str = "embed") -> list[list[float]]:
+    async def embed(self, texts: list[str], input_type: InputType, purpose: str = "embed",
+                    patient: bool = True) -> list[list[float]]:
+        """`patient=False` (interactive search) fails fast on rate limits instead of waiting them out."""
         out: list[list[float] | None] = [None] * len(texts)
         for batch in make_batches(texts):
             est_tokens = sum(min(approx_tokens(texts[i]), 32_000) for i in batch)
@@ -63,11 +74,16 @@ class VoyageEmbedder:
                             [texts[i] for i in batch],
                             model=self.settings.voyage_model,
                             input_type=input_type,
-                            truncation=True,
+                            truncation=False,  # Stored passages must represent the entire embedding input.
                             output_dimension=self.settings.embedding_dim,
                         )
                         break
                     except Exception as e:  # voyageai raises its own error types; retry transient ones
+                        if type(e).__name__ == "RateLimitError":
+                            if not patient or attempt == 3:
+                                raise EmbeddingRateLimited(str(e)) from e
+                            await asyncio.sleep(RATE_LIMIT_BACKOFF_S * (attempt + 1))
+                            continue
                         if attempt == 3 or type(e).__name__ in ("AuthenticationError", "InvalidRequestError"):
                             raise
                         await asyncio.sleep(2**attempt)

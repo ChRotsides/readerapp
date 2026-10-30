@@ -7,6 +7,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..ai.embeddings import EmbeddingRateLimited
 from ..ai.spend import BudgetExceeded
 from ..config import Settings, get_settings
 from ..models import CrawlState, SourceRecord, Work, WorkLink
@@ -15,6 +16,7 @@ from ..search.pipeline import BudgetError, SearchService
 from ..search.schemas import SearchRequest, SearchResponse, WorkOut
 from ..services import Services, build_services, source_names
 from ..works import load_works, title_search
+from .links import register as register_link_routes
 
 log = logging.getLogger(__name__)
 bearer = HTTPBearer(auto_error=False)
@@ -70,6 +72,10 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
             return await service.search(s, req)
         except (BudgetError, BudgetExceeded) as e:
             raise HTTPException(402, f"monthly AI budget reached: {e}") from e
+        except EmbeddingRateLimited as e:
+            raise HTTPException(429, "Voyage embedding rate limit reached. Without a payment method on the Voyage "
+                                     "account it allows only 3 requests/minute; add one at dashboard.voyageai.com, "
+                                     "or try again in a minute.") from e
 
     @app.get("/works/{work_id}", response_model=WorkOut, dependencies=auth)
     async def get_work(work_id: str, s: AsyncSession = Depends(session)):
@@ -153,6 +159,7 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
     async def spend(request: Request):
         return await svc(request).spend.summary()
 
+    register_link_routes(app, svc, session, auth)
     return app
 
 

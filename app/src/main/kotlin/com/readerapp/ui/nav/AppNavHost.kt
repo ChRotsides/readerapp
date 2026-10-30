@@ -6,6 +6,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.readerapp.ui.browser.BrowserScreen
 import com.readerapp.ui.detail.NovelDetailScreen
+import com.readerapp.ui.crawl.CrawlScreen
 import com.readerapp.ui.discover.DiscoverScreen
 import com.readerapp.ui.discover.WorkScreen
 import com.readerapp.ui.glossary.GlossaryScreen
@@ -23,6 +24,7 @@ import kotlinx.serialization.Serializable
 @Serializable object SettingsRoute
 @Serializable object AdaptersRoute
 @Serializable object DiscoverRoute
+@Serializable object CrawlRoute
 @Serializable data class WorkRoute(val workId: String)
 
 @Composable
@@ -43,7 +45,11 @@ fun AppNavHost() {
                 onOpenWork = { nav.navigate(WorkRoute(it)) },
                 onOpenNovel = { nav.navigate(NovelRoute(it)) },
                 onOpenSettings = { nav.navigate(SettingsRoute) },
+                onOpenCrawl = { nav.navigate(CrawlRoute) },
             )
+        }
+        composable<CrawlRoute> {
+            CrawlScreen(onBack = { nav.popBackStack() }, onOpenSettings = { nav.navigate(SettingsRoute) })
         }
         composable<WorkRoute> {
             WorkScreen(
@@ -78,7 +84,11 @@ fun AppNavHost() {
             )
         }
         composable<SettingsRoute> {
-            SettingsScreen(onBack = { nav.popBackStack() }, onOpenAdapters = { nav.navigate(AdaptersRoute) })
+            SettingsScreen(
+                onBack = { nav.popBackStack() },
+                onOpenAdapters = { nav.navigate(AdaptersRoute) },
+                onOpenCrawl = { nav.navigate(CrawlRoute) },
+            )
         }
         composable<AdaptersRoute> { AdaptersScreen(onBack = { nav.popBackStack() }) }
     }

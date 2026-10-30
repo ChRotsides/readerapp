@@ -49,8 +49,11 @@ class RoomNovelPageStore @Inject constructor(private val novels: NovelRepository
 }
 
 @Singleton
-class TocImporterRunner @Inject constructor(private val toc: TocImporter) : TocRunner {
-    override suspend fun import(novelId: Long): TocResult = toc.import(novelId)
+class TocImporterRunner @Inject constructor(
+    private val toc: TocImporter,
+    private val offline: com.readerapp.offline.OfflineDownloads,
+) : TocRunner {
+    override suspend fun import(novelId: Long): TocResult = toc.import(novelId).also { offline.afterToc(novelId, it) }
 }
 
 /** "Add to library" from a novel-page URL found by search. */
@@ -59,7 +62,8 @@ class NovelPageImporter @Inject constructor(
     private val store: NovelPageStore,
     private val toc: TocRunner,
 ) {
-    suspend fun import(req: NovelPageRequest): NovelPageImport {
+    /** [hidden]: a "from search" novel, not shown in the library until the user adds or reads it. */
+    suspend fun import(req: NovelPageRequest, hidden: Boolean = false): NovelPageImport {
         val domain = DomainRateLimiter.domainOf(req.url)
         val existing = store.findExisting(domain, req.url, req.title)
         if (existing != null && existing.tocFetchedAt != null) return NovelPageImport.AlreadyInLibrary(existing.id)
@@ -73,6 +77,7 @@ class NovelPageImporter @Inject constructor(
                 domain = domain,
                 language = req.language,
                 novelUrl = req.url,
+                inLibrary = !hidden,
             ),
         )
         // Active adapter with TOC selectors: create the chapter list now. Anything else falls back to the browser.
@@ -96,12 +101,17 @@ class NovelPageImporter @Inject constructor(
 
 /** The library as plain novels (an interface so view models can be tested with a fake). */
 fun interface LibrarySource {
+    /** The visible library. */
     fun novels(): Flow<List<Novel>>
+
+    /** Hidden novels saved by search prefetch (opening chapters available offline). */
+    fun savedFromSearch(): Flow<List<Novel>> = kotlinx.coroutines.flow.flowOf(emptyList())
 }
 
 @Singleton
 class RoomLibrarySource @Inject constructor(private val repo: NovelRepository) : LibrarySource {
     override fun novels(): Flow<List<Novel>> = repo.observeAll()
+    override fun savedFromSearch(): Flow<List<Novel>> = repo.observeHidden()
 }
 
 @Singleton

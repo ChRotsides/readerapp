@@ -29,6 +29,7 @@ data class BrowserUiState(
 class BrowserViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val importer: NovelImporter,
+    private val joinHook: com.readerapp.offline.NovelJoinHook,
 ) : ViewModel() {
     val startUrl: String = savedStateHandle.toRoute<BrowserRoute>().url ?: DEFAULT_URL
 
@@ -57,8 +58,10 @@ class BrowserViewModel @Inject constructor(
         _state.update { it.copy(draft = null, working = true) }
         viewModelScope.launch {
             when (val result = importer.import(draft, title)) {
-                is ImportResult.Imported ->
+                is ImportResult.Imported -> {
+                    joinHook.joined(result.novelId)
                     _state.update { it.copy(working = false, imported = result.novelId to result.chapterId) }
+                }
                 is ImportResult.Failed -> _state.update { it.copy(working = false, message = result.reason) }
             }
         }

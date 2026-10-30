@@ -206,7 +206,7 @@ class FlakyEmbedder:
     def __init__(self, inner):
         self.inner, self.fail = inner, True
 
-    async def embed(self, texts, input_type, purpose="embed"):
+    async def embed(self, texts, input_type, purpose="embed", patient=True):
         if self.fail:
             raise BudgetExceeded("cap")
         return await self.inner.embed(texts, input_type, purpose)

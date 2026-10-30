@@ -62,7 +62,7 @@ class Source(ABC):
 
     async def fetch_sample_chapters(self, record: SourceRecordData, n: int) -> list[str]:
         """Optional: text of the first `n` FREE chapters (never paid/locked) for embedding. The caller embeds
-        and discards the text; it must never be persisted. Default: none."""
+        and stores each chunk alongside its vector. Default: none."""
         return []
 
 

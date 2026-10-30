@@ -56,8 +56,12 @@ class TextCleaner(private val junkPatterns: List<Regex> = DEFAULT_JUNK_PATTERNS)
         // Any run of whitespace incl. NBSP, ideographic space and zero-width characters.
         private val WHITESPACE = Regex("[\\s\\u00A0\\u3000\\u200B\\u200C\\u200D\\uFEFF]+")
 
+        /** A paragraph that is only a counter, e.g. Webnovel's per-paragraph comment counts ("13", "1.2k", "99+"). */
+        val COUNTER_PARAGRAPH = Regex("^\\d{1,5}(\\.\\d)?[kK]?\\+?$")
+
         /** Conservative defaults; each pattern is matched against a whole normalized paragraph. */
         val DEFAULT_JUNK_PATTERNS: List<Regex> = listOf(
+            COUNTER_PARAGRAPH,
             Regex("^(please\\s+)?(read|find)\\s+(the\\s+)?(latest|newest|more)\\s+chapters?\\s+(at|on|from)\\b.{0,80}$", RegexOption.IGNORE_CASE),
             Regex("^(visit|find us at|read at|source:?|translated (by|at|from)|support (us|the author) (on|at))\\s*:?\\s*(https?://|www\\.)\\S+.{0,40}$", RegexOption.IGNORE_CASE),
             Regex("^\\W*(https?://|www\\.)?[a-z0-9-]+(\\.[a-z0-9-]+)*\\.(com|net|org|io|co|me|cc|xyz)\\W*$", RegexOption.IGNORE_CASE),

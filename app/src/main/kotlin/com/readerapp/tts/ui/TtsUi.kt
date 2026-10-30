@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -76,7 +77,7 @@ fun TtsDialogs(viewModel: TtsViewModel = hiltViewModel()) {
 fun TtsMiniPlayer(modifier: Modifier = Modifier, viewModel: TtsViewModel = hiltViewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val model by viewModel.modelState.collectAsStateWithLifecycle()
-    Column(modifier) {
+    Column(modifier.navigationBarsPadding()) {
         when (val m = model) {
             is ModelState.Downloading -> ModelProgress(
                 "Downloading speech model - ${mb(m.downloaded)} of ${mb(m.total)}",

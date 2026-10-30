@@ -196,8 +196,15 @@ class SpeechPipeline(
                 val key = AudioKey(chapter.chapterId, chapter.variant, voice, speed, s.ref.paragraph, s.ref.sentence, AudioKey.hash(s.text))
                 val file = cache.get(key) ?: withContext(Dispatchers.IO) {
                     val audio = engine().synthesize(s.text, voice, speed)
-                    cache.put(key) { WavWriter.write(it, audio.samples, audio.sampleRate) }
-                }
+                    if (audio.samples.isEmpty()) {
+                        // Punctuation-only "sentences" (e.g. "***") legitimately make no sound; anything with words
+                        // means the engine is broken, and silently skipping would race through the chapter.
+                        if (s.text.any { it.isLetterOrDigit() }) error("Speech engine produced no audio")
+                        null
+                    } else {
+                        cache.put(key) { WavWriter.write(it, audio.samples, audio.sampleRate) }
+                    }
+                } ?: continue
                 val duration = withContext(Dispatchers.IO) { WavWriter.durationMs(file) }
                 recent.addLast(file.name)
                 while (recent.size > RECENT_PROTECTED) recent.removeFirst()

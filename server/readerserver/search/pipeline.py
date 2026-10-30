@@ -79,7 +79,7 @@ class SearchService:
 
         # Synopsis is combined with its tag list, as profiles are embedded that way.
         syn_query = synopsis + ("\nTags: " + ", ".join(tags) if tags else "")
-        vecs = await self.embedder.embed([*scenes, syn_query], "query", "search")
+        vecs = await self.embedder.embed([*scenes, syn_query], "query", "search", patient=False)
         scene_vecs, syn_vec = vecs[:-1], vecs[-1]
 
         chunk_lists = [await knn_chunks(session, v, clauses) for v in scene_vecs]

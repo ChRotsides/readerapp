@@ -94,8 +94,9 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.anthropic.java)
 
-    // TTS: sherpa-onnx prebuilt AAR (not on Maven Central) from the official GitHub release v2.0.1, Kokoro via OfflineTts.
-    implementation(files("libs/sherpa-onnx-2.0.1.aar"))
+    // TTS: sherpa-onnx prebuilt AAR (not on Maven Central) from the official GitHub release v1.13.8, Kokoro via OfflineTts.
+    // Stay on 1.x: 2.0 removed the bundled espeak-ng phonemizer (kokoro dataDir is ignored), which leaves Kokoro silent.
+    implementation(files("libs/sherpa-onnx-1.13.8.aar"))
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.session)
     implementation(libs.commons.compress)

@@ -5,6 +5,7 @@ from readerserver.ai.spend import BudgetExceeded, SpendTracker
 from readerserver.config import Settings
 from readerserver.crawl.http import BlockedError
 from readerserver.crawl.runner import CrawlRunner
+from readerserver.indexing import chunk_text
 from readerserver.models import CrawlState, ProfileEmbedding, SampleEmbedding, SourceRecord, Work
 from readerserver.resolution.resolver import Resolver, seed_tags
 from readerserver.sources.base import CatalogBatch, Source, SourceRecordData as D
@@ -89,7 +90,7 @@ async def test_process_pending_resolves_and_indexes_profiles(maker, fake_embedde
     assert len(fake_embedder.calls) == calls_before
 
 
-async def test_sample_chapters_store_vectors_only(maker, fake_embedder):
+async def test_sample_chapters_store_chunks_and_vectors(maker, fake_embedder):
     runner = CrawlRunner(maker, settings(), fake_embedder, Resolver(None))
     text = "\n\n".join(["The hero walked into the dark forest and drew his sword. " * 40] * 6)
     src = FakeSource([[d(1)]], chapters=[text, text, text])
@@ -97,8 +98,11 @@ async def test_sample_chapters_store_vectors_only(maker, fake_embedder):
     n = await runner.sample_chapters(src)
     assert n > 1
     cols = {c.name for c in inspect(SampleEmbedding).columns}
-    assert not ({"text", "content", "body", "chapter_text"} & cols)  # chapter text is never stored
+    assert "chunk_text" in cols
     async with maker() as s:
+        rows = (await s.scalars(select(SampleEmbedding))).all()
+        assert rows and all(row.chunk_text for row in rows)
+        assert [row.chunk_text for row in sorted(rows, key=lambda r: r.chunk_index)] == chunk_text(text) * settings().sample_chapters
         assert await s.scalar(select(func.count()).select_from(SampleEmbedding)) == n
         assert (await s.scalars(select(SourceRecord))).one().samples_done is True
 
