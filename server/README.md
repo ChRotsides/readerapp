@@ -1,4 +1,4 @@
-# ReaderApp discovery server (Milestone 5a)
+# ReaderApp discovery server (Milestones 5a + 5b)
 
 Python/FastAPI server for novel discovery: a polite crawler framework, official-API sources (Syosetu, AniList,
 MangaUpdates, MyAnimeList), entity resolution into canonical works, Voyage embeddings in Postgres/pgvector, and the HyDE
@@ -12,7 +12,9 @@ server/
   readerserver/
     config.py db.py models.py text.py services.py worker.py indexing.py works.py
     crawl/       http.py (PoliteClient: rate limit, robots, backoff, block detection), runner.py (checkpointed crawl)
-    sources/     base.py (Source interface), syosetu.py anilist.py mangaupdates.py mal.py
+    sources/     base.py (Source interface), syosetu.py anilist.py mangaupdates.py mal.py,
+                 5b HTML sources: webnovel novelupdates kakuyomu royalroad scribblehub wuxiaworld tapas alphapolis munpia
+                 (htmlutil.py, listing.py shared helpers; html_registry.py registers them in services.HTML_SOURCES)
     ai/          llm.py (Claude), embeddings.py (Voyage), jev.py (Jev + Claude fallback), spend.py (monthly cap)
     resolution/  scoring.py (hard matches, scoring, decisions), resolver.py (DB pipeline, unlink), merge.py, tag_seed.py
     search/      pipeline.py (HyDE search), fusion.py (RRF), retrieval.py (kNN), schemas.py
@@ -40,7 +42,7 @@ All endpoints except `/health` require `Authorization: Bearer $API_TOKEN`.
 
 ## Running crawls
 
-Scheduled crawling is **off by default**. Opt in with `ENABLED_SOURCES=syosetu,anilist,mangaupdates,mal` (the worker
+Scheduled crawling is **off by default**. Opt in with `ENABLED_SOURCES=syosetu,anilist,mangaupdates,mal,kakuyomu,tapas,wuxiaworld,alphapolis` (never list a source in `blocked` state; see below) (the worker
 re-crawls every `CRAWL_INTERVAL_HOURS`, default 24, and continues from stored checkpoints). Manual:
 
 ```bash
@@ -152,3 +154,28 @@ class MySource(Source):
 Let `BlockedError` / `RobotsDisallowed` propagate (the runner marks the source blocked). Fill `SourceRecordData`
 (`external_ids`, `related_urls`, native-script `alt_titles` and `language` drive entity resolution; put a
 `_version` token into `raw` and use `self.known_versions` to skip unchanged detail pages).
+
+## HTML-site sources (Milestone 5b): status per site
+
+All use `PoliteClient` (robots.txt enforced, honest UA with `CRAWLER_CONTACT`, >= 3 s between requests, backoff, stop on
+403/challenge). Nothing is evaded: no headless browser, UA spoofing, proxies or logins. A `BlockedError` /
+`RobotsDisallowed` marks the source `blocked` (see "Running crawls"). Note: Python's `urllib.robotparser` ignores `*`/`$`
+wildcards inside paths (e.g. Kakuyomu's `/works/*/episodes/*/read$`); our sources never request those pages.
+Live structure was probed with <= 15 requests per site (Oct 2026); fixtures keep page structure but replace prose with
+placeholders (`tests/fixtures/html/_README.txt` lists which are recorded vs hand-written).
+
+| source | status (Oct 2026) | catalog | samples |
+|---|---|---|---|
+| kakuyomu | working | ranking pages (`/rankings/{genre}/entire?work_variation=long&page=N`): `__NEXT_DATA__` Apollo cache has full work data | no (episodes disallowed) |
+| tapas | working | `/sitemap-novel.xml` (lastmod = version) -> `/series/{slug}/info`; novels only; `/search` never used | no |
+| wuxiaworld | working | `/sitemap-novels.xml` -> `/novel/{slug}` (`__REACT_QUERY_STATE__`) | yes, only chapters flagged free (`pricingInfo.isFree`, or novel pricing model `free`), never karma-gated |
+| alphapolis | working | `/novel/index?sort=24hpt&page=N` listing (title, author, abstract, tags, status, counts) | yes: public, non-rental episodes from the page-embedded TOC |
+| munpia | partial / unverified | `/sitemap/sitemap_pl_serial.xml` -> `/api/v1/pc/novel-detail/{id}` (the SPA's own endpoint, robots `Allow: /`); response schema unconfirmed | no (`/novel/viewer/` disallowed) |
+| webnovel | **blocked** (Cloudflare 403 challenge) | parsers written from public markup, untested live | implemented (unlocked chapters only), untested |
+| novelupdates | **blocked** (Cloudflare 403 challenge) | parsers written from long-stable markup, untested live | n/a (metadata only) |
+| royalroad | **blocked** (Cloudflare 403 challenge) | parsers untested live | no |
+| scribblehub | **blocked** (Cloudflare 403) | parsers untested live | implemented, untested |
+
+Syosetu also supports sample chapters now (`ncode.syosetu.com/{ncode}/{n}/`, robots Crawl-delay 1, we wait >= 3 s).
+For blocked sources the design fallback applies: import their metadata manually. If a block is lifted (`POST
+/admin/crawl/{source}/unblock`), re-verify the selectors against live pages first.

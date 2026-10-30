@@ -12,13 +12,15 @@ from .crawl.http import PoliteClient
 from .db import session_maker
 from .sources.anilist import AniListSource
 from .sources.base import Source
+from .sources.html_registry import register as register_html_sources
 from .sources.mal import MalSource
 from .sources.mangaupdates import MangaUpdatesSource
 from .sources.syosetu import SyosetuSource
 
-# 5b registers its HTML-site sources here: name -> factory(http, settings) -> Source
+# HTML-site sources (5b): name -> factory(settings) -> Source, filled by sources.html_registry.register()
 HTML_SOURCES: dict = {}
 API_SOURCES = ["syosetu", "anilist", "mangaupdates", "mal"]
+register_html_sources(HTML_SOURCES)
 
 
 @dataclass
@@ -58,7 +60,7 @@ def build_source(name: str, settings: Settings) -> Source:
         return PoliteClient(settings.user_agent, min_delay=max(settings.crawl_min_delay_seconds, delay or 0.0), respect_robots=robots)
 
     if name == "syosetu":
-        return SyosetuSource(client(None, False))
+        return SyosetuSource(client(None, False), html_http=client(None, True))
     if name == "anilist":
         return AniListSource(client(2.2, False))
     if name == "mangaupdates":

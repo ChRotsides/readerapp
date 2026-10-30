@@ -28,9 +28,10 @@ async def run_source(sv: Services, runner: CrawlRunner, name: str, max_items: in
         pipeline = await runner.process_pending()
         return res | {"pipeline": pipeline}
     finally:
-        http = getattr(source, "http", None)
-        if http:
-            await http.aclose()
+        for attr in ("http", "html_http"):
+            http = getattr(source, attr, None)
+            if http:
+                await http.aclose()
 
 
 async def due_sources(sv: Services) -> list[str]:

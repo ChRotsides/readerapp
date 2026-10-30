@@ -9,6 +9,7 @@ from typing import Any
 
 from ..crawl.http import PoliteClient
 from .base import CatalogBatch, Source, SourceRecordData
+from .htmlutil import block_text, get_html, soup
 
 API = "https://api.syosetu.com/novelapi/api/"
 FIELDS = "t-n-u-w-s-bg-g-k-gf-gl-nt-e-ga-l-ti-gp"
@@ -56,8 +57,9 @@ class SyosetuSource(Source):
     name = "syosetu"
     respect_robots = False  # documented public API
 
-    def __init__(self, http: PoliteClient, per_genre_limit: int = 2000, page_size: int = 500):
+    def __init__(self, http: PoliteClient, per_genre_limit: int = 2000, page_size: int = 500, html_http: PoliteClient | None = None):
         self.http = http
+        self.html_http = html_http  # robots-respecting client for ncode.syosetu.com chapter pages (Crawl-delay 1 s; we use >= 3 s)
         self.per_genre_limit = min(per_genre_limit, 2000)
         self.page_size = min(page_size, 500)
 
@@ -82,3 +84,28 @@ class SyosetuSource(Source):
     async def fetch_work(self, source_id: str) -> SourceRecordData | None:
         items = await self._query(ncode=source_id, lim=1)
         return parse_item(items[0]) if items else None
+
+    async def fetch_sample_chapters(self, record: SourceRecordData, n: int) -> list[str]:
+        """First `n` (max 3) chapters from ncode.syosetu.com HTML. All Syosetu chapters are public; R-18 works live on
+        novel18.syosetu.com and are never fetched."""
+        if self.html_http is None:
+            return []
+        out: list[str] = []
+        for no in range(1, min(n, 3) + 1):
+            html = await get_html(self.html_http, f"https://ncode.syosetu.com/{record.source_id}/{no}/")
+            text = parse_chapter(html) if html else None
+            if not text:
+                break
+            out.append(text)
+        return out
+
+
+def parse_chapter(html: str) -> str | None:
+    """Body text of a chapter page (`.js-novel-text.p-novel__text` without the preface/afterword modifier classes)."""
+    doc = soup(html)
+    for el in doc.select(".js-novel-text.p-novel__text"):
+        cls = " ".join(el.get("class", []))
+        if "preface" in cls or "afterword" in cls:
+            continue
+        return block_text(el)
+    return None
