@@ -1,0 +1,20 @@
+HTTP/2 200 
+date: Fri, 30 Oct 2026 04:04:07 GMT
+content-type: application/json
+cf-ray: a52788b6d832b83a-LCA
+cf-cache-status: DYNAMIC
+access-control-allow-origin: *
+cache-control: no-cache, private
+server: cloudflare
+set-cookie: laravel_session=aVfVZ64Wcj0obInteYgURkSHdKG6SQpSdOwfe0rA; expires=Fri, 30-Oct-2026 16:04:07 GMT; Max-Age=43200; path=/; httponly
+access-control-allow-headers: Authorization,Accept,DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Content-Range,Range
+access-control-allow-methods: GET, POST, OPTIONS
+access-control-expose-headers: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Content-Length, Content-Range
+x-content-type-options: nosniff
+x-frame-options: SAMEORIGIN
+x-ratelimit-limit: 30
+x-ratelimit-remaining: 29
+x-xss-protection: 1; mode=block
+report-to: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=7OVgdcZKB%2FjUbZfzqLJdgnkxo6ATwapXJ2P6GJgZjj0S2oCzK6WK%2FyogTw4wIxUlbplF%2FRNJn6e4s04czDtF2fpvb%2B6YHvIba1v22NPr1furiWipnSD11NIFC14pVqHy4om7og%3D%3D"}]}
+nel: {"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
+
