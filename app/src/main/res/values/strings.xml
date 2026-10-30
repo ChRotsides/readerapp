@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">ReaderApp</string>
+    <string name="tts_channel_name">Reading aloud</string>
 </resources>

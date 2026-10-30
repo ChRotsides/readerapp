@@ -97,6 +97,7 @@ fun SettingsScreen(onBack: () -> Unit, onOpenAdapters: () -> Unit, viewModel: Se
             )
 
             HorizontalDivider()
+            com.readerapp.tts.ui.TtsSettingsSection()
             Text("Reader", style = MaterialTheme.typography.titleMedium)
             ReaderPrefsControls(prefs, onFontSize = { viewModel.setFontSize(it) }, onLineSpacing = { viewModel.setLineSpacing(it) })
             Text("Prefetch ahead: ${prefs.prefetchCount} chapters", style = MaterialTheme.typography.labelLarge)

@@ -58,6 +58,22 @@ import com.readerapp.data.settings.ReaderPrefs
 import com.readerapp.ui.settings.ReaderPrefsControls
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.runtime.MutableIntState
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import com.readerapp.tts.SentenceSplitter
+import com.readerapp.tts.SpeechRef
+import com.readerapp.tts.ui.TtsDialogs
+import com.readerapp.tts.ui.TtsMiniPlayer
+import com.readerapp.tts.ui.TtsViewModel
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -68,6 +84,7 @@ fun ReaderScreen(
     onOpenSettings: () -> Unit,
     viewModel: ReaderViewModel = hiltViewModel(),
     qaViewModel: QaViewModel = hiltViewModel(),
+    ttsViewModel: TtsViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val prefs by viewModel.prefs.collectAsStateWithLifecycle()
@@ -77,6 +94,9 @@ fun ReaderScreen(
     val qa by qaViewModel.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     var showPrefs by remember { mutableStateOf(false) }
+    val tts by ttsViewModel.state.collectAsStateWithLifecycle()
+    val firstVisibleParagraph = remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) { ttsViewModel.messages.collect { snackbar.showSnackbar(it) } }
 
     LaunchedEffect(message) {
         message?.let { snackbar.showSnackbar(it); viewModel.messageShown() }
@@ -100,7 +120,18 @@ fun ReaderScreen(
         ReaderUiState.Loading -> null
     }
 
+    // Reading aloud moved on to another chapter: bring the reader along (only if it was showing the previous one).
+    var lastTtsChapter by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(tts.ref?.chapterId, tts.active) {
+        val id = tts.ref?.chapterId
+        if (tts.active && id != null && lastTtsChapter != null && lastTtsChapter != id && current?.id == lastTtsChapter) {
+            viewModel.load(id)
+        }
+        lastTtsChapter = if (tts.active) id else null
+    }
+
     Scaffold(
+        bottomBar = { TtsMiniPlayer() },
         topBar = {
             TopAppBar(
                 title = { Text(current?.title?.ifBlank { null } ?: "Reader", maxLines = 1, overflow = TextOverflow.Ellipsis) },
@@ -108,6 +139,12 @@ fun ReaderScreen(
                 actions = {
                     current?.let { c ->
                         IconButton(onClick = { onOpenInBrowser(c.url) }) { Icon(Icons.Filled.Public, "Open in browser") }
+                    }
+                    (state as? ReaderUiState.Content)?.let { c ->
+                        val reading = tts.active && tts.ref?.chapterId == c.chapter.id && tts.playing
+                        IconButton(onClick = { ttsViewModel.onPlayButton(c.chapter.id, c.variant, firstVisibleParagraph.intValue) }) {
+                            Icon(if (reading) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (reading) "Pause reading" else "Read aloud")
+                        }
                     }
                     IconButton(onClick = { showPrefs = true }) { Icon(Icons.Filled.TextFormat, "Text settings") }
                 },
@@ -159,12 +196,17 @@ fun ReaderScreen(
                             onScroll = { index, offset -> viewModel.saveScroll(s.chapter, index, offset) },
                             onFinished = { viewModel.markRead(s.chapter.id) },
                             onAskAi = { selected -> qaViewModel.open(selected, s.chapter.id, s.variant, s.paragraphs) },
+                            speaking = tts.ref?.takeIf { tts.active && it.chapterId == s.chapter.id && tts.variant == s.variant.name },
+                            firstVisibleParagraph = firstVisibleParagraph,
+                            onReadFromHere = { p -> ttsViewModel.readFrom(s.chapter.id, s.variant, p) },
                         )
                     }
                 }
             }
         }
     }
+
+    TtsDialogs()
 
     if (qa.open) {
         QaSheet(state = qa, onAsk = qaViewModel::ask, onDismiss = qaViewModel::dismiss, onOpenSettings = {
@@ -195,6 +237,9 @@ private fun ChapterContent(
     onScroll: (index: Int, offset: Int) -> Unit,
     onFinished: () -> Unit,
     onAskAi: (String) -> Unit,
+    speaking: SpeechRef?,
+    firstVisibleParagraph: MutableIntState,
+    onReadFromHere: (paragraph: Int) -> Unit,
 ) {
     // A fresh list state per chapter restores that chapter's saved position.
     androidx.compose.runtime.key(content.chapter.id) {
@@ -208,6 +253,24 @@ private fun ChapterContent(
                 .debounce(700)
                 .distinctUntilChanged()
                 .collect { (i, o) -> latestOnScroll(i, o) }
+        }
+        LaunchedEffect(listState) {
+            snapshotFlow { (listState.firstVisibleItemIndex - 1).coerceAtLeast(0) }.collect { firstVisibleParagraph.intValue = it }
+        }
+        // Follow the sentence being read aloud; a manual drag pauses following for a few seconds.
+        var userScrolledAt by remember { mutableStateOf(0L) }
+        LaunchedEffect(listState) {
+            listState.interactionSource.interactions.collect { if (it is DragInteraction.Start) userScrolledAt = System.currentTimeMillis() }
+        }
+        LaunchedEffect(speaking?.paragraph, speaking?.sentence, speaking?.chapterId) {
+            val p = speaking?.paragraph ?: return@LaunchedEffect
+            if (System.currentTimeMillis() - userScrolledAt < AUTO_SCROLL_PAUSE_MS) return@LaunchedEffect
+            val index = p + 1
+            val info = listState.layoutInfo
+            val visible = info.visibleItemsInfo.firstOrNull { it.index == index }
+            val inView = visible != null && visible.offset >= 0 && visible.offset + visible.size <= info.viewportEndOffset
+            // A paragraph taller than the screen is only scrolled to when it is not visible at all.
+            if (!inView && (visible == null || visible.size < info.viewportSize.height)) listState.animateScrollToItem(index)
         }
         LaunchedEffect(listState) {
             snapshotFlow { listState.layoutInfo.visibleItemsInfo.any { it.index >= footerIndex - 1 } }
@@ -234,13 +297,31 @@ private fun ChapterContent(
                         modifier = Modifier.padding(bottom = 20.dp),
                     )
                 }
-                itemsIndexed(content.paragraphs, key = { i, _ -> "p$i" }) { _, paragraph ->
-                    Text(
-                        paragraph,
-                        fontSize = fontSize,
-                        lineHeight = lineHeight,
-                        modifier = Modifier.padding(bottom = (prefs.fontSizeSp * 0.6f).dp),
-                    )
+                itemsIndexed(content.paragraphs, key = { i, _ -> "p$i" }) { i, paragraph ->
+                    var menu by remember { mutableStateOf(false) }
+                    val highlight = speaking?.takeIf { it.paragraph == i }?.sentence
+                    val highlightColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.28f)
+                    val shown = remember(paragraph, highlight, highlightColor) {
+                        val span = highlight?.let { SentenceSplitter.split(paragraph).getOrNull(it) }
+                        if (span == null) androidx.compose.ui.text.AnnotatedString(paragraph) else buildAnnotatedString {
+                            append(paragraph.substring(0, span.start))
+                            withStyle(SpanStyle(background = highlightColor)) { append(paragraph.substring(span.start, span.end)) }
+                            append(paragraph.substring(span.end))
+                        }
+                    }
+                    Box {
+                        Text(
+                            shown,
+                            fontSize = fontSize,
+                            lineHeight = lineHeight,
+                            modifier = Modifier
+                                .clickable { menu = true }
+                                .padding(bottom = (prefs.fontSizeSp * 0.6f).dp),
+                        )
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(text = { Text("Read from here") }, onClick = { menu = false; onReadFromHere(i) })
+                        }
+                    }
                 }
                 item(key = "nav") {
                     Row(
@@ -259,6 +340,8 @@ private fun ChapterContent(
         } }
     }
 }
+
+private const val AUTO_SCROLL_PAUSE_MS = 6_000L
 
 private fun variantLabel(v: TextVariant) = when (v) {
     TextVariant.ORIGINAL -> "Original"
