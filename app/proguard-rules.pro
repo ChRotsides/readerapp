@@ -15,3 +15,6 @@
 -keepattributes *Annotation*
 -keepclassmembers class com.readerapp.** { *** Companion; }
 -keepclasseswithmembers class com.readerapp.** { kotlinx.serialization.KSerializer serializer(...); }
+
+# sherpa-onnx is called from native code through JNI.
+-keep class com.k2fsa.sherpa.onnx.** { *; }

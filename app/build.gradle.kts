@@ -16,6 +16,8 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        // sherpa-onnx ships native libs for four ABIs (~45 MB each); the target phone is arm64 only.
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     buildTypes {
@@ -90,6 +92,12 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.anthropic.java)
+
+    // TTS: sherpa-onnx prebuilt AAR (not on Maven Central) from the official GitHub release v2.0.1, Kokoro via OfflineTts.
+    implementation(files("libs/sherpa-onnx-2.0.1.aar"))
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.session)
+    implementation(libs.commons.compress)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

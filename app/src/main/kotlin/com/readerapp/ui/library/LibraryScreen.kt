@@ -61,6 +61,7 @@ fun LibraryScreen(
     var pendingDelete by remember { mutableStateOf<NovelWithProgress?>(null) }
 
     Scaffold(
+        bottomBar = { com.readerapp.tts.ui.TtsMiniPlayer() },
         topBar = {
             TopAppBar(
                 title = { Text("Library") },
