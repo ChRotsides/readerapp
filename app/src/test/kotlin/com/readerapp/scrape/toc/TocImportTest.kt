@@ -104,11 +104,11 @@ class TocImportTest {
     }
 
     @Test
-    fun `newest-first lists are reversed and repeated next pages stop`() = runTest {
+    fun `newest-first lists are reversed`() = runTest {
         val html = buildString {
             append("<ul class='chapters'>")
             for (i in 3 downTo 1) append("<li><a href='/book/1/ch-$i'>Chapter $i</a></li>")
-            append("</ul><a class='next' href='/book/1'>next</a>")
+            append("</ul>")
         }
         val tocStore = FakeTocStore(novel)
         val pages = FakePages(mapOf("https://$domain/book/1" to html))
@@ -195,6 +195,24 @@ class TocImportTest {
             ),
         )
         assertTrue(TocImporter(FakeTocStore(novel), store(spec()), many).import(1, maxPages = 2) is TocResult.Incomplete)
+    }
+
+    @Test
+    fun `empty, repeated or cyclic later pages are incomplete and commit nothing`() = runTest {
+        val placeholder = Chapter(id = 5, novelId = 1, index = 0, title = "", url = "https://$domain/book/1/ch-57")
+        val p1 = "https://$domain/book/1" to listPage(1, 3, "/book/1?page=2")
+        val cases = mapOf(
+            "empty page 2 (login / JS shell)" to mapOf(p1, "https://$domain/book/1?page=2" to "<html><body>please log in</body></html>"),
+            "page 2 repeats page 1" to mapOf(p1, "https://$domain/book/1?page=2" to listPage(1, 3, null)),
+            "page 2 links back to page 1" to mapOf(p1, "https://$domain/book/1?page=2" to listPage(4, 5, "/book/1")),
+        )
+        for ((name, pageMap) in cases) {
+            val tocStore = FakeTocStore(novel, listOf(placeholder))
+            val result = TocImporter(tocStore, store(spec()), FakePages(pageMap)).import(1)
+            assertTrue("$name: $result", result is TocResult.Incomplete)
+            assertEquals(name, listOf(placeholder), tocStore.chapters)
+            assertNull(name, tocStore.tocAt)
+        }
     }
 
     @Test

@@ -123,4 +123,25 @@ class ServerApiTest {
         assertEquals(null, com.readerapp.data.settings.normalizeServerUrl("ftp://a.b"))
         assertEquals(null, com.readerapp.data.settings.normalizeServerUrl("   "))
     }
+
+    @Test fun bodyIsReadOffTheCallerThreadAndUnexpectedFailuresAreTyped() = runTest {
+        val readers = mutableListOf<String>()
+        val spying = okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+            val r = chain.proceed(chain.request())
+            val orig = r.body
+            r.newBuilder().body(object : okhttp3.ResponseBody() {
+                override fun contentType() = orig.contentType()
+                override fun contentLength() = orig.contentLength()
+                override fun source(): okio.BufferedSource { readers += Thread.currentThread().name; return orig.source() }
+            }).build()
+        }.build()
+        val spyApi = ServerApi({ config }, spying)
+        server.enqueue(MockResponse().setBody(workJson))
+        spyApi.work("w1")
+        assertTrue(readers.toString(), readers.isNotEmpty() && readers.none { it.startsWith("Test worker") })
+
+        val exploding = okhttp3.OkHttpClient.Builder().addInterceptor { _ -> throw IllegalStateException("boom") }.build()
+        try { ServerApi({ config }, exploding).work("w1"); fail() } catch (e: SearchException) { assertTrue(e is SearchException.Network) }
+        assertTrue(ServerApi({ config }, exploding).testConnection().let { it is ConnectionResult.Other || it == ConnectionResult.Unreachable })
+    }
 }

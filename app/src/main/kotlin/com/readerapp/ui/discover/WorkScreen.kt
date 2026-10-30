@@ -33,6 +33,8 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -51,11 +53,19 @@ fun WorkScreen(
 ) {
     val s by viewModel.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
+    // The snackbar is shown from a screen-scoped coroutine (not the effect below): clearing the event changes the
+    // effect's key and cancels it, so nothing suspending may run in the effect after eventHandled(). The event is
+    // consumed only after the navigation callback ran.
+    val scope = rememberCoroutineScope()
     LaunchedEffect(s.event) {
         when (val e = s.event) {
-            is WorkEvent.OpenNovel -> { viewModel.eventHandled(); onOpenNovel(e.novelId) }
-            is WorkEvent.OpenBrowser -> { viewModel.eventHandled(); snackbar.showSnackbar(e.message); onOpenInBrowser(e.url) }
-            is WorkEvent.Message -> { viewModel.eventHandled(); snackbar.showSnackbar(e.text) }
+            is WorkEvent.OpenNovel -> { onOpenNovel(e.novelId); viewModel.eventHandled() }
+            is WorkEvent.OpenBrowser -> {
+                scope.launch { snackbar.showSnackbar(e.message) }
+                onOpenInBrowser(e.url)
+                viewModel.eventHandled()
+            }
+            is WorkEvent.Message -> { scope.launch { snackbar.showSnackbar(e.text) }; viewModel.eventHandled() }
             null -> Unit
         }
     }

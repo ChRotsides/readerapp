@@ -72,7 +72,11 @@ class TocImporter @Inject constructor(
         var incomplete: String? = null
         while (next != null) {
             if (fetchedPages >= maxPages) { incomplete = "more than $maxPages TOC pages"; break }
-            if (!visited.add(UrlKey.of(next))) break // the list links back to a page already read: that is its end
+            if (!visited.add(UrlKey.of(next))) {
+                // A link back to a page already read is not a verified end of the list.
+                incomplete = "TOC page ${fetchedPages + 1} links back to an already-read page ($next)"
+                break
+            }
             val page = try {
                 pages.fetch(next)
             } catch (e: CancellationException) {
@@ -90,9 +94,14 @@ class TocImporter @Inject constructor(
             if (info == null) info = pageInfo
             val known = refs.map { UrlKey.of(it.url) }.toHashSet()
             val fresh = toc.refs.filter { UrlKey.of(it.url) !in known }
-            // A "next page" that adds nothing new would loop forever on sites that repeat the same list.
-            if (fresh.isEmpty()) break
+            if (fresh.isEmpty()) {
+                // The first page is checked below (FetchFailed). A later page with no new chapters is a login page, a JS
+                // shell, changed markup or a repeated list: not a verified end, so nothing may be reconciled.
+                if (fetchedPages > 1) incomplete = "TOC page $fetchedPages ($next) listed no new chapters"
+                break
+            }
             refs += fresh
+            // Only a page that listed chapters and has no next link is the verified terminal page.
             next = toc.nextPageUrl
         }
         // Only a complete traversal may re-index the novel: a partial list would renumber from zero and interleave

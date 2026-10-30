@@ -19,8 +19,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.job
-import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
@@ -122,53 +126,60 @@ class ClaudeClient @Inject constructor(
     override fun stream(request: LlmRequest): Flow<String> = channelFlow {
         val client = client()
         val params = buildParams(request)
-        var input = 0L
-        var output = 0L
-        var finalUsage = false
-        var streamedBytes = 0L
+        val usageTracker = StreamUsageTracker()
         var acquired = false
         var served: String? = null
         var iterations: JsonValue? = null
         var stop: StopReason? = null
         var stopExplanation: String? = null
-        val job = coroutineContext.job
         try {
-            withContext(Dispatchers.IO) {
-                val sr = try {
+            val sr = withContext(Dispatchers.IO) {
+                val created = try {
                     client.messages().createStreaming(params)
                 } catch (e: Exception) {
                     throw translate(e)
                 }
-                acquired = true
-                val closer = job.invokeOnCompletion { if (it != null) runCatching { sr.close() } }
-                try {
-                    sr.use { response ->
-                        val events = response.stream().iterator()
-                        while (events.hasNext()) {
-                            ensureActive()
-                            val event = events.next()
-                            event.messageStart().ifPresent { start ->
-                                val u = start.message().usage()
-                                served = start.message().model().asString()
-                                input = effectiveInputTokens(u.inputTokens(), u.cacheCreationInputTokens().orElse(0), u.cacheReadInputTokens().orElse(0))
-                            }
-                            event.messageDelta().ifPresent { d ->
-                                output = d.usage().outputTokens()
-                                finalUsage = true
-                                d.usage()._additionalProperties()["iterations"]?.let { iterations = it }
-                                d.delta().stopReason().ifPresent { stop = it }
-                                d.delta().stopDetails().ifPresent { stopExplanation = it.explanation().orElse(null) }
-                            }
-                            val text = event.contentBlockDelta().flatMap { it.delta().text() }.map { it.text() }.orElse(null)
-                            if (!text.isNullOrEmpty()) {
-                                streamedBytes += text.toByteArray(Charsets.UTF_8).size
-                                // send() suspends the IO thread while the collector is slow; closing on cancel still works.
-                                send(text)
-                            }
+                acquired = true // the request was accepted: input is billed from here on, whatever happens next
+                // Cancelled while connecting: withContext would discard the result, so close it here.
+                if (!isActive) runCatching { created.close() }
+                created
+            }
+            // Cancellation closes the response immediately (a child coroutine's finally runs on cancel, not after the
+            // blocked hasNext() returns), which unblocks the read in the IO thread.
+            withCloseOnCancel(sr) {
+                sr.use { response ->
+                    val events = response.stream().iterator()
+                    while (events.hasNext()) {
+                        ensureActive()
+                        val event = events.next()
+                        event.messageStart().ifPresent { start ->
+                            val u = start.message().usage()
+                            served = start.message().model().asString()
+                            usageTracker.onMessageStart(
+                                effectiveInputTokens(u.inputTokens(), u.cacheCreationInputTokens().orElse(0), u.cacheReadInputTokens().orElse(0)),
+                                u.outputTokens(),
+                            )
+                        }
+                        event.messageDelta().ifPresent { d ->
+                            usageTracker.onMessageDelta(d.usage().outputTokens())
+                            d.usage()._additionalProperties()["iterations"]?.let { iterations = it }
+                            d.delta().stopReason().ifPresent { stop = it }
+                            d.delta().stopDetails().ifPresent { stopExplanation = it.explanation().orElse(null) }
+                        }
+                        var text: String? = null
+                        event.contentBlockDelta().ifPresent { cbd ->
+                            val d = cbd.delta()
+                            // Thinking and tool-input deltas are billed output too, but are not emitted to the collector.
+                            d.thinking().ifPresent { usageTracker.onGenerated(it.thinking()) }
+                            d.inputJson().ifPresent { usageTracker.onGenerated(it.partialJson()) }
+                            text = d.text().map { it.text() }.orElse(null)
+                        }
+                        text?.takeIf { it.isNotEmpty() }?.let {
+                            usageTracker.onGenerated(it)
+                            // send() suspends the IO thread while the collector is slow; closing on cancel still works.
+                            send(it)
                         }
                     }
-                } finally {
-                    closer.dispose()
                 }
             }
         } catch (e: CancellationException) {
@@ -176,14 +187,16 @@ class ClaudeClient @Inject constructor(
         } catch (e: LlmException) {
             throw e
         } catch (e: Exception) {
+            // Closing the response on cancel makes the blocked read fail with an IO error: that is a cancellation.
+            if (!currentCoroutineContext().isActive) throw CancellationException("Stream cancelled", e)
             throw translate(e)
         } finally {
             withContext(NonCancellable) {
                 if (acquired) {
-                    if (input == 0L) input = ModelPricing.inputTokensUpperBound(ModelPricing.inputBytes(request))
-                    if (!finalUsage) output = maxOf(output, ModelPricing.outputTokensUpperBound(streamedBytes))
+                    val input = usageTracker.billableInput(ModelPricing.inputTokensUpperBound(ModelPricing.inputBytes(request)))
+                    val output = usageTracker.billableOutput()
+                    recordAttempts(request, iterations, served, input, output)
                 }
-                if (input > 0 || output > 0) recordAttempts(request, iterations, served, input, output)
             }
         }
         when (stop) {
@@ -286,3 +299,72 @@ internal suspend fun <T> blockingThenRecord(call: () -> T, record: suspend (T) -
         withContext(NonCancellable) { runCatching { record(result) } }
         result
     }
+
+/**
+ * Runs the blocking [block] on Dispatchers.IO while a sibling coroutine closes [closeable] the moment the caller is
+ * cancelled. Unlike `invokeOnCompletion` (which fires only once the blocked child has already finished), the watcher's
+ * `finally` runs on cancellation, so a thread blocked in a read is unblocked immediately. On normal completion the
+ * watcher is cancelled too; closing twice is harmless.
+ */
+internal suspend fun <T> withCloseOnCancel(closeable: AutoCloseable, block: suspend CoroutineScope.() -> T): T =
+    withContext(Dispatchers.IO) {
+        val watcher = launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                awaitCancellation()
+            } finally {
+                runCatching { closeable.close() }
+            }
+        }
+        try {
+            block()
+        } finally {
+            watcher.cancel()
+        }
+    }
+
+/**
+ * Token accounting of one streamed response. Every reported number is kept (message_start input + output, the
+ * cumulative output of message_delta). Generation not covered by a usage event (visible text, thinking, tool input
+ * since the last one) is estimated conservatively, so an interrupted stream is never booked as free.
+ */
+internal class StreamUsageTracker {
+    private var input = 0L
+    private var reportedOutput = 0L
+    private var finalReported = false
+    private var unreportedBytes = 0L
+    private var started = false
+
+    fun onMessageStart(inputTokens: Long, outputTokens: Long) {
+        started = true
+        input = inputTokens
+        reportedOutput = maxOf(reportedOutput, outputTokens)
+        unreportedBytes = 0
+    }
+
+    fun onMessageDelta(outputTokens: Long) {
+        started = true
+        reportedOutput = maxOf(reportedOutput, outputTokens)
+        finalReported = true
+        unreportedBytes = 0
+    }
+
+    fun onGenerated(text: String) {
+        started = true
+        if (finalReported) finalReported = false // more output after a usage report: the report is no longer final
+        unreportedBytes += text.toByteArray(Charsets.UTF_8).size
+    }
+
+    fun billableInput(fallbackBound: Long): Long = if (input > 0) input else fallbackBound
+
+    fun billableOutput(): Long {
+        if (finalReported) return reportedOutput
+        val estimate = ModelPricing.outputTokensUpperBound(unreportedBytes)
+        val floor = if (started) MIN_STARTED_OUTPUT_TOKENS else 1L
+        return maxOf(reportedOutput, estimate, floor)
+    }
+
+    companion object {
+        /** An opened stream has begun generating (possibly thinking silently): never book less than this. */
+        const val MIN_STARTED_OUTPUT_TOKENS = 16L
+    }
+}

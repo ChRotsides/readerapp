@@ -1,6 +1,9 @@
 package com.readerapp.search
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -56,7 +59,17 @@ class ServerApi(
             json.decodeFromString(ListSerializer(Work.serializer()), it)
         }
 
-    override suspend fun testConnection(): ConnectionResult {
+    override suspend fun testConnection(): ConnectionResult = withContext(Dispatchers.IO) {
+        try {
+            runConnectionTest()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            ConnectionResult.Other("Connection test failed: ${e.message ?: e::class.java.simpleName}")
+        }
+    }
+
+    private suspend fun runConnectionTest(): ConnectionResult {
         val cfg = configProvider.config() ?: return ConnectionResult.NotConfigured
         val base = cfg.baseUrl.toHttpUrlOrNull() ?: return ConnectionResult.Other("The server URL is not valid.")
         val quick = client.newBuilder().callTimeout(15, TimeUnit.SECONDS).readTimeout(12, TimeUnit.SECONDS).build()
@@ -96,6 +109,21 @@ class ServerApi(
         val cfg = configProvider.config() ?: throw SearchException.NotConfigured()
         val base = cfg.baseUrl.toHttpUrlOrNull() ?: throw SearchException.NotConfigured()
         val request = authed(base, path, cfg.token, query, method)
+        // The callback only guarantees headers; reading and parsing the body must not happen on the caller's (main) thread.
+        return withContext(Dispatchers.IO) {
+            try {
+                execute(request, parse)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: SearchException) {
+                throw e
+            } catch (e: Exception) {
+                throw SearchException.Network(e)
+            }
+        }
+    }
+
+    private suspend fun <T> execute(request: Request, parse: (String) -> T): T {
         val response = try {
             client.newCall(request).await()
         } catch (e: InterruptedIOException) {
