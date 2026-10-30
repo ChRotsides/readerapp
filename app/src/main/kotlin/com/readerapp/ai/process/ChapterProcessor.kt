@@ -76,10 +76,14 @@ class ChapterProcessor @Inject constructor(
         }
     }
 
+    private val sourceChanged = ProcessOutcome.Retry("the chapter text changed while it was being processed")
+
     private suspend fun fix(chapterId: Long, original: List<String>): ProcessOutcome {
+        val revision = SourceRevision.of(original)
         val result = processor.fix(original, ClaudeModels.HAIKU)
-        chapters.saveText(ChapterText(chapterId, TextVariant.FIXED, result.paragraphs, ClaudeModels.HAIKU))
-        return ProcessOutcome.Done(TextVariant.FIXED, result.partial)
+        // Committed only if the ORIGINAL is still the text this result was derived from (checked in the transaction).
+        val ok = chapters.commitDerived(chapterId, revision, ChapterText(chapterId, TextVariant.FIXED, result.paragraphs, ClaudeModels.HAIKU))
+        return if (ok) ProcessOutcome.Done(TextVariant.FIXED, result.partial) else sourceChanged
     }
 
     private suspend fun translate(novelId: Long, chapterId: Long, original: List<String>, force: Boolean): ProcessOutcome =
@@ -95,10 +99,15 @@ class ChapterProcessor @Inject constructor(
                 )
             }
             val model = if (novel.translateWithSonnet) ClaudeModels.SONNET else ClaudeModels.HAIKU
+            val revision = SourceRevision.of(original)
             val existing = glossary.list(novelId)
             val result = processor.translate(original, TranslationSpec(source, target, existing, model))
-            chapters.saveText(ChapterText(chapterId, TextVariant.TRANSLATED, result.paragraphs, model))
-            glossary.saveAll(GlossaryMerger.merge(novelId, glossary.list(novelId), result.newTerms))
-            ProcessOutcome.Done(TextVariant.TRANSLATED, result.partial)
+            // One transaction: source-revision check, the translated variant and the glossary merge against a FRESH
+            // read of the glossary (so concurrent manual edits survive and a crash cannot leave terms behind).
+            val ok = chapters.commitDerived(
+                chapterId, revision, ChapterText(chapterId, TextVariant.TRANSLATED, result.paragraphs, model),
+                glossaryNovelId = novelId,
+            ) { fresh -> GlossaryMerger.merge(novelId, fresh, result.newTerms) }
+            if (ok) ProcessOutcome.Done(TextVariant.TRANSLATED, result.partial) else sourceChanged
         }
 }

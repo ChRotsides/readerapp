@@ -53,7 +53,7 @@ class TtsViewModel @Inject constructor(
     /** Play button: toggles if this chapter is being read, otherwise starts reading it at [paragraph]. */
     fun onPlayButton(chapterId: Long, variant: TextVariant, paragraph: Int) {
         val s = state.value
-        if (s.active && s.ref?.chapterId == chapterId) send(TtsCommand.Toggle) else readFrom(chapterId, variant, paragraph)
+        if (isSamePlayback(s, chapterId, variant)) send(TtsCommand.Toggle) else readFrom(chapterId, variant, paragraph)
     }
 
     fun readFrom(chapterId: Long, variant: TextVariant, paragraph: Int) {
@@ -106,3 +106,7 @@ class TtsViewModel @Inject constructor(
 
     fun setCacheLimitMb(mb: Int) = viewModelScope.launch { settings.setCacheLimitMb(mb) }
 }
+
+/** The audio in progress is this chapter AND this text variant (a different shown variant needs a restart). */
+internal fun isSamePlayback(s: TtsState, chapterId: Long, variant: TextVariant): Boolean =
+    s.active && s.ref?.chapterId == chapterId && (s.variant == null || s.variant == variant.name)

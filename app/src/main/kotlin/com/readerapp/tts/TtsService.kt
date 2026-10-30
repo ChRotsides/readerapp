@@ -64,7 +64,8 @@ class TtsService : MediaSessionService() {
     private var wakeLock: PowerManager.WakeLock? = null
 
     /** Playlist mirror: items[i] is the player's media item i. */
-    private val items = ArrayList<ReadyItem>()
+    private val window = PlaylistWindow(KEEP_BEHIND)
+    private val items: ArrayList<ReadyItem> get() = window.items
     private var starved = false
     private var voice = TtsConfig.DEFAULT_VOICE
     private var speed = TtsConfig.DEFAULT_SPEED
@@ -72,7 +73,8 @@ class TtsService : MediaSessionService() {
 
     private val sink = object : PlaylistSink {
         override suspend fun append(item: ReadyItem) = withContext(Dispatchers.Main.immediate) {
-            items += item
+            window.append(item)
+            cache.pin(item.file.name)
             player.addMediaItem(toMediaItem(item))
             val idx = items.lastIndex
             if (idx == 0) {
@@ -88,7 +90,7 @@ class TtsService : MediaSessionService() {
         }
 
         override suspend fun clear() = withContext(Dispatchers.Main.immediate) {
-            items.clear()
+            releaseWindow()
             player.clearMediaItems()
             starved = false
         }
@@ -121,6 +123,9 @@ class TtsService : MediaSessionService() {
                 .setChannelName(R.string.tts_channel_name)
                 .build(),
         )
+        // Register the session with the service explicitly: no MediaController connects to it, so without this the
+        // notification manager would never observe it (stuck "preparing" notification, wrong task-removal handling).
+        addSession(checkNotNull(session))
         pipeline = SpeechPipeline(workScope, source, { engines.get() }, cache, sink)
         scope.launch { for (cmd in controller.commands) handle(cmd) }
         scope.launch {
@@ -150,7 +155,11 @@ class TtsService : MediaSessionService() {
             .setOngoing(true)
             .build()
         ServiceCompat.startForeground(this, NOTIFICATION_ID, placeholder, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
-        return super.onStartCommand(intent, flags, startId)
+        super.onStartCommand(intent, flags, startId)
+        // A null intent is the system restarting us after process death: there is no reading state or queued
+        // command any more, so do not linger as an idle foreground service.
+        if (intent == null) stopSelf(startId)
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
@@ -175,7 +184,7 @@ class TtsService : MediaSessionService() {
             TtsCommand.Pause -> player.pause()
             TtsCommand.Toggle -> if (player.playWhenReady) player.pause() else player.play()
             TtsCommand.NextSentence -> if (player.currentMediaItemIndex + 1 < items.size) player.seekToNextMediaItem()
-            TtsCommand.PrevSentence -> player.seekTo(maxOf(player.currentMediaItemIndex - 1, 0), 0)
+            TtsCommand.PrevSentence -> prevSentence()
             TtsCommand.NextParagraph -> skipParagraph(forward = true)
             TtsCommand.PrevParagraph -> skipParagraph(forward = false)
             TtsCommand.NextChapter -> nextChapter()
@@ -229,6 +238,15 @@ class TtsService : MediaSessionService() {
             var first = idx
             while (first > 0 && same(first - 1)) first--
             if (idx > first) { player.seekTo(first, 0); return }
+            if (first == 0 && window.hasTrimmedHead) {
+                // The window no longer holds what precedes this item: regenerate from the paragraph start (or the
+                // paragraph before it when we are already at its start).
+                val target = if (cur.sentence > 0) cur.paragraph else cur.paragraph - 1
+                if (target >= 0) {
+                    pipeline.start(SpeechRef(cur.chapterId, target, 0), voice, speed).also { markBuffering() }
+                } else player.seekTo(0, 0)
+                return
+            }
             if (first > 0) {
                 var prev = first - 1
                 while (prev > 0 && items[prev - 1].ref.chapterId == items[prev].ref.chapterId &&
@@ -238,6 +256,32 @@ class TtsService : MediaSessionService() {
                 pipeline.start(SpeechRef(cur.chapterId, cur.paragraph - 1, 0), voice, speed).also { markBuffering() }
             } else player.seekTo(0, 0)
         }
+    }
+
+    private fun prevSentence() {
+        val idx = player.currentMediaItemIndex
+        if (idx > 0) { player.seekTo(idx - 1, 0); return }
+        val cur = items.firstOrNull()?.ref
+        if (window.hasTrimmedHead && cur != null) {
+            val target = if (cur.sentence > 0) cur.paragraph else cur.paragraph - 1
+            if (target >= 0) pipeline.start(SpeechRef(cur.chapterId, target, 0), voice, speed).also { markBuffering() }
+        } else player.seekTo(0, 0)
+    }
+
+    /** Unpins and forgets every playlist item (the player's own list is cleared by the caller). */
+    private fun releaseWindow() {
+        items.forEach { cache.unpin(it.file.name) }
+        window.clear()
+        player.clearMediaItems()
+        starved = false
+    }
+
+    /** Drops played items far behind the playhead so the playlist (and the files it pins) stays bounded. */
+    private fun trimBehind() {
+        val n = window.excess(player.currentMediaItemIndex)
+        if (n <= 0) return
+        player.removeMediaItems(0, n)
+        window.drop(n).forEach { cache.unpin(it.file.name) }
     }
 
     private fun markBuffering() = controller.update { it.copy(buffering = true) }
@@ -258,8 +302,7 @@ class TtsService : MediaSessionService() {
         sleepJob?.cancel()
         pipeline.stop()
         player.stop()
-        player.clearMediaItems()
-        items.clear()
+        releaseWindow()
         controller.reset()
         releaseWakeLock()
         stopSelf()
@@ -312,7 +355,8 @@ class TtsService : MediaSessionService() {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             val idx = player.currentMediaItemIndex
             val item = items.getOrNull(idx) ?: return
-            pipeline.playhead(idx)
+            trimBehind()
+            pipeline.playhead(window.absolute(player.currentMediaItemIndex))
             controller.update {
                 it.copy(
                     ref = item.ref, variant = item.variant, novelTitle = item.novelTitle,
@@ -414,6 +458,8 @@ class TtsService : MediaSessionService() {
         const val NOTIFICATION_ID = 4100
         const val ACTION_NEXT_CHAPTER = "readerapp.tts.NEXT_CHAPTER"
         const val MB = 1024L * 1024L
+        /** Sentences kept behind the playhead for previous-sentence / previous-paragraph navigation. */
+        const val KEEP_BEHIND = 40
         const val WAKE_LOCK_TIMEOUT_MS = 6L * 60 * 60 * 1000
     }
 }

@@ -177,6 +177,16 @@ class RepairOrchestratorTest {
     }
 
     @Test
+    fun admissionRefusalInsideTheCallDefersInsteadOfGivingUp() = runTest {
+        val llm = object : LlmClient {
+            override suspend fun complete(request: LlmRequest): LlmResponse = throw com.readerapp.ai.LlmException.SpendCapReached()
+        }
+        val s = Setup(brokenStore(adapter(1, AdapterStatus.BROKEN, "bad")), llm)
+        assertEquals(RepairOutcome.SpendCapReached, s.orchestrator.repair(domain))
+        assertEquals(listOf("cap"), s.notifier.events)
+    }
+
+    @Test
     fun secondConcurrentJobForSameDomainIsRejected() = runTest {
         val store = brokenStore(adapter(1, AdapterStatus.BROKEN, "bad"))
         val s = Setup(store, FakeLlm(listOf(reply("good")), delayMs = 1_000))

@@ -128,8 +128,9 @@ class WorkSpendResumeScheduler @Inject constructor(@ApplicationContext private v
             .setInitialDelay(delayMs, TimeUnit.MILLISECONDS)
             .setConstraints(constraints)
             .build()
-        // KEEP: one pending month-boundary wake-up is enough.
-        WorkManager.getInstance(context).enqueueUniqueWork("spend-resume-month", ExistingWorkPolicy.KEEP, request)
+        // One wake-up per target month, named by it: the running worker re-arms for a LATER month under a different
+        // name, so KEEP cannot discard its own replacement (it would while the current work is still unfinished).
+        WorkManager.getInstance(context).enqueueUniqueWork(ModelPricing.resumeWorkName(now), ExistingWorkPolicy.KEEP, request)
     }
 
     override fun resumeNow() {

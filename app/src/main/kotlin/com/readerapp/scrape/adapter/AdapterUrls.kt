@@ -1,5 +1,6 @@
 package com.readerapp.scrape.adapter
 
+import com.google.common.net.InternetDomainName
 import java.net.URI
 
 /**
@@ -29,17 +30,17 @@ object AdapterUrls {
         return resolved.toString()
     }
 
-    private val SECOND_LEVEL = setOf("co", "com", "org", "net", "ac", "gov", "edu", "or", "ne", "go")
-
-    /** Heuristic eTLD+1 without a public-suffix list: last two labels, three for `co.uk`-style suffixes. */
+    /**
+     * eTLD+1 from the Public Suffix List (Guava's copy, which includes the PRIVATE section: `blogspot.com`,
+     * `github.io`, ... are public suffixes, so two tenants are never "the same site"). Hosts that are themselves a
+     * public suffix are returned whole.
+     */
     fun registrableDomain(host: String): String {
         val h = host.lowercase().trimEnd('.')
         if (h.matches(Regex("[0-9.]+")) || h.contains(':')) return h // IP literal
-        val labels = h.split('.')
-        if (labels.size <= 2) return h
-        val tld = labels.last()
-        val sld = labels[labels.size - 2]
-        val take = if (tld.length == 2 && sld in SECOND_LEVEL) 3 else 2
-        return labels.takeLast(take).joinToString(".")
+        val name = runCatching { InternetDomainName.from(h) }.getOrNull() ?: return h
+        // PSL default rule "*": an unlisted TLD (`.example`, `.local`, `localhost`) counts as a one-label suffix.
+        if (!name.hasPublicSuffix()) return h.split('.').takeLast(2).joinToString(".")
+        return if (name.isPublicSuffix) h else name.topPrivateDomain().toString()
     }
 }

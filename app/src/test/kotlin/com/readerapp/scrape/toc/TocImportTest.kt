@@ -48,10 +48,12 @@ class TocImportTest {
         override suspend fun applyToc(novelId: Long, refs: List<ChapterRef>): TocPlan {
             val plan = TocPlan.compute(chapters, refs)
             plan.updates.forEach { u -> chapters.replaceAll { if (it.id == u.chapterId) it.copy(index = u.index, title = u.title) else it } }
+            chapters.removeAll { it.id in plan.deletes }
             plan.inserts.forEachIndexed { i, ins -> chapters += Chapter(id = 100L + i, novelId = novelId, index = ins.index, title = ins.title, url = ins.url) }
             return plan
         }
         override suspend fun latestFetchedChapterUrl(novelId: Long): String? = chapters.lastOrNull()?.url
+        override suspend fun existingChapterUrls(novelId: Long) = chapters.map { it.url }
         override suspend fun markTocFetched(novelId: Long, at: Long) { tocAt = at }
     }
 
@@ -133,7 +135,7 @@ class TocImportTest {
         val pages = FakePages(
             mapOf(
                 chapter.url to "<html><body><div class='breadcrumb'><a href='/'>Home</a><a href='/book/1'>Novel</a></div></body></html>",
-                "https://$domain/book/1" to listPage(1, 2, null),
+                "https://$domain/book/1" to listPage(1, 3, null),
             ),
         )
         val result = TocImporter(tocStore, store(spec()), pages).import(1)
@@ -174,5 +176,53 @@ class TocImportTest {
         )
         assertEquals(listOf(TocUpdate(2, 1, "Two")), plan.updates) // chapter 1 already correct => no update
         assertEquals(listOf(TocInsert("https://a.example/x/3", 2, "Three")), plan.inserts)
+    }
+
+    @Test
+    fun `incomplete traversal commits nothing and is not marked fetched`() = runTest {
+        val late = Chapter(id = 5, novelId = 1, index = 0, title = "", url = "https://$domain/book/1/ch-57")
+        val tocStore = FakeTocStore(novel, listOf(late))
+        val pages = FakePages(mapOf("https://$domain/book/1" to listPage(1, 3, "/book/1?page=2"))) // page 2 fails
+        val result = TocImporter(tocStore, store(spec()), pages).import(1)
+        assertTrue(result is TocResult.Incomplete)
+        assertEquals(listOf(late), tocStore.chapters)
+        assertNull(tocStore.tocAt)
+        // The page limit counts as incomplete as well.
+        val many = FakePages(
+            mapOf(
+                "https://$domain/book/1" to listPage(1, 3, "/book/1?page=2"),
+                "https://$domain/book/1?page=2" to listPage(4, 6, "/book/1?page=3"),
+            ),
+        )
+        assertTrue(TocImporter(FakeTocStore(novel), store(spec()), many).import(1, maxPages = 2) is TocResult.Incomplete)
+    }
+
+    @Test
+    fun `discovered novel page that does not list the novel's chapters is rejected`() = runTest {
+        val chapter = Chapter(id = 9, novelId = 1, index = 0, url = "https://$domain/book/1/ch-3")
+        val tocStore = FakeTocStore(novel.copy(novelUrl = null), listOf(chapter))
+        val pages = FakePages(
+            mapOf(
+                chapter.url to "<div class='breadcrumb'><a href='/'>Home</a><a href='/book/2'>Other</a></div>",
+                "https://$domain/book/2" to listPage(1, 2, null),
+            ),
+        )
+        assertTrue(TocImporter(tocStore, store(spec()), pages).import(1) is TocResult.FetchFailed)
+        assertNull(tocStore.novel.novelUrl)
+        assertEquals(1, tocStore.chapters.size)
+    }
+
+    @Test
+    fun `unlisted chapters are appended after the toc or dropped when they are bare placeholders`() {
+        val existing = listOf(
+            Chapter(id = 1, novelId = 1, index = 0, url = "https://a.example/x/99", status = com.readerapp.data.db.ChapterStatus.FETCHED),
+            Chapter(id = 2, novelId = 1, index = 1, url = "https://a.example/x/100"), // placeholder, unread
+            Chapter(id = 3, novelId = 1, index = 2, url = "https://a.example/x/101", read = true),
+        )
+        val plan = TocPlan.compute(existing, listOf(ChapterRef("One", "https://a.example/x/1"), ChapterRef("Two", "https://a.example/x/2")))
+        assertEquals(listOf(2L), plan.deletes)
+        assertEquals(listOf(TocUpdate(1, 2, ""), TocUpdate(3, 3, "")), plan.updates)
+        assertEquals(0, plan.firstAffectedIndex(existing)) // arcs reaching index 0 or later are stale
+        assertNull(TocPlan(emptyList(), emptyList()).firstAffectedIndex(existing))
     }
 }

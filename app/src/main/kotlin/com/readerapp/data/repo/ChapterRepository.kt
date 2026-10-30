@@ -2,8 +2,12 @@ package com.readerapp.data.repo
 
 import androidx.room.withTransaction
 import com.readerapp.data.db.AppDatabase
+import com.readerapp.data.db.ArcSummary
+import com.readerapp.data.db.ArcSummaryDao
 import com.readerapp.data.db.Chapter
 import com.readerapp.data.db.ChapterDao
+import com.readerapp.data.db.GlossaryDao
+import com.readerapp.data.db.GlossaryEntry
 import com.readerapp.data.db.ChapterStatus
 import com.readerapp.data.db.ChapterText
 import com.readerapp.data.db.ChapterTextDao
@@ -17,10 +21,14 @@ class ChapterRepository @Inject constructor(
     private val db: AppDatabase,
     private val chapters: ChapterDao,
     private val texts: ChapterTextDao,
+    private val arcs: ArcSummaryDao,
+    private val glossary: GlossaryDao,
 ) {
     fun observeChapters(novelId: Long): Flow<List<Chapter>> = chapters.observeForNovel(novelId)
 
     suspend fun get(id: Long): Chapter? = chapters.get(id)
+
+    suspend fun all(novelId: Long): List<Chapter> = chapters.all(novelId)
 
     suspend fun findByUrl(novelId: Long, url: String): Chapter? = chapters.findByUrl(novelId, url)
 
@@ -30,18 +38,44 @@ class ChapterRepository @Inject constructor(
 
     suspend fun last(novelId: Long): Chapter? = chapters.last(novelId)
 
-    suspend fun next(chapter: Chapter): Chapter? = chapters.nextAfter(chapter.novelId, chapter.index, chapter.id)
+    /** Neighbours are resolved from the chapter's CURRENT row: a held [Chapter] snapshot may predate a re-index. */
+    private suspend fun current(chapter: Chapter): Chapter = chapters.get(chapter.id) ?: chapter
+
+    suspend fun next(chapter: Chapter): Chapter? = current(chapter).let { chapters.nextAfter(it.novelId, it.index, it.id) }
 
     suspend fun nextUnfetched(chapter: Chapter): Chapter? =
-        chapters.nextUnfetchedAfter(chapter.novelId, chapter.index, chapter.id)
+        current(chapter).let { chapters.nextUnfetchedAfter(it.novelId, it.index, it.id) }
 
     suspend fun previous(chapter: Chapter): Chapter? =
-        chapters.previousBefore(chapter.novelId, chapter.index, chapter.id)
+        current(chapter).let { chapters.previousBefore(it.novelId, it.index, it.id) }
 
     suspend fun getText(chapterId: Long, variant: TextVariant = TextVariant.ORIGINAL): ChapterText? =
         texts.get(chapterId, variant)
 
     suspend fun saveText(text: ChapterText) = texts.upsert(text)
+
+    /**
+     * Commits a processing result (Fixed / Translated variant) in one transaction, only if the chapter's ORIGINAL text
+     * still has [sourceRevision] (a refetch may have replaced it meanwhile, which also dropped the derived variants).
+     * With [glossaryNovelId], [mergeGlossary] is applied to a fresh read of that novel's glossary in the same
+     * transaction. Returns false (nothing written) when the source changed.
+     */
+    suspend fun commitDerived(
+        chapterId: Long,
+        sourceRevision: String,
+        text: ChapterText,
+        glossaryNovelId: Long? = null,
+        mergeGlossary: (List<GlossaryEntry>) -> List<GlossaryEntry> = { emptyList() },
+    ): Boolean = db.withTransaction {
+        val current = texts.get(chapterId, TextVariant.ORIGINAL)?.paragraphs
+        if (current == null || com.readerapp.ai.process.SourceRevision.of(current) != sourceRevision) return@withTransaction false
+        texts.upsert(text)
+        if (glossaryNovelId != null) {
+            val toWrite = mergeGlossary(glossary.list(glossaryNovelId))
+            if (toWrite.isNotEmpty()) glossary.upsertAll(toWrite)
+        }
+        true
+    }
 
     /** Emits whenever a variant of the chapter text is added, replaced or removed. */
     fun observeTexts(chapterId: Long): Flow<List<ChapterText>> = texts.observeAll(chapterId)
@@ -49,7 +83,7 @@ class ChapterRepository @Inject constructor(
     suspend fun allTexts(chapterId: Long): List<ChapterText> = texts.all(chapterId)
 
     suspend fun nextN(chapter: Chapter, limit: Int): List<Chapter> =
-        chapters.nextN(chapter.novelId, chapter.index, chapter.id, limit)
+        current(chapter).let { chapters.nextN(it.novelId, it.index, it.id, limit) }
 
     suspend fun inRange(novelId: Long, from: Int, to: Int): List<Chapter> = chapters.inRange(novelId, from, to)
 
@@ -62,7 +96,11 @@ class ChapterRepository @Inject constructor(
      */
     suspend fun applyToc(novelId: Long, refs: List<com.readerapp.scrape.ChapterRef>): com.readerapp.scrape.toc.TocPlan =
         db.withTransaction {
-            val plan = com.readerapp.scrape.toc.TocPlan.compute(chapters.all(novelId), refs)
+            val existing = chapters.all(novelId)
+            val plan = com.readerapp.scrape.toc.TocPlan.compute(existing, refs)
+            // Arc summaries are keyed by index ranges: drop every arc whose chapters may have moved.
+            plan.firstAffectedIndex(existing)?.let { arcs.deleteFrom(novelId, it) }
+            plan.deletes.forEach { chapters.delete(it) }
             plan.updates.forEach { chapters.setIndexAndTitle(it.chapterId, it.index, it.title) }
             plan.inserts.forEach { chapters.insert(Chapter(novelId = novelId, index = it.index, title = it.title, url = it.url)) }
             plan
@@ -76,6 +114,16 @@ class ChapterRepository @Inject constructor(
 
     suspend fun sampleUrls(domain: String, excludeUrl: String, limit: Int): List<String> =
         chapters.sampleUrls(domain, excludeUrl, limit)
+
+    suspend fun latestFetchedUrlForNovel(novelId: Long): String? = chapters.latestFetchedUrlForNovel(novelId)
+
+    /** Saves an arc summary only if the chapters in its range are still exactly [expected] (id to index); atomic with re-indexing. */
+    suspend fun saveArcIfUnchanged(arc: ArcSummary, expected: Set<Pair<Long, Int>>): Boolean = db.withTransaction {
+        val now = chapters.inRange(arc.novelId, arc.startIndex, arc.endIndex).map { it.id to it.index }.toSet()
+        if (now != expected) return@withTransaction false
+        arcs.upsert(arc)
+        true
+    }
 
     suspend fun latestFetchedUrl(domain: String): String? = chapters.latestFetchedUrl(domain)
 
@@ -94,6 +142,7 @@ class ChapterRepository @Inject constructor(
      */
     suspend fun insertAt(novelId: Long, url: String, index: Int, title: String = ""): Chapter = db.withTransaction {
         chapters.findByUrl(novelId, url)?.let { return@withTransaction it }
+        arcs.deleteFrom(novelId, index)
         chapters.shiftFrom(novelId, index, 1)
         chapters.insert(Chapter(novelId = novelId, index = index, title = title, url = url))
         checkNotNull(chapters.findByUrl(novelId, url))

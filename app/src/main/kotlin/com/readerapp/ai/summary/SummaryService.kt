@@ -33,8 +33,12 @@ class SummaryService @Inject constructor(
      * Throws [LlmException] (spend cap, no key, transient errors) for the caller to handle.
      */
     suspend fun ensureSummary(chapterId: Long): Boolean {
-        if (summaries.get(chapterId) != null) return true
         val chapter = chapters.get(chapterId) ?: return false
+        if (summaries.get(chapterId) != null) {
+            // A previous run may have saved the chapter summary and then failed building the arc it completes.
+            maybeBuildArc(chapter.novelId, ArcMath.arcIndex(chapter.index))
+            return true
+        }
         val text = VariantChoice.best(chapters.allTexts(chapterId)) ?: return false
         val body = text.paragraphs.joinToString("\n\n").take(MAX_CHAPTER_CHARS)
         if (body.isBlank()) return false
@@ -74,8 +78,11 @@ class SummaryService @Inject constructor(
                 cacheSystem = true,
             ),
         )
-        summaries.saveArc(ArcSummary(novelId, arcIndex, from, to, reply.text.trim(), ClaudeModels.HAIKU))
-        return true
+        // Atomic with re-indexing: if the arc's chapters moved while the model was working, discard the result.
+        return chapters.saveArcIfUnchanged(
+            ArcSummary(novelId, arcIndex, from, to, reply.text.trim(), ClaudeModels.HAIKU),
+            inArc.map { it.id to it.index }.toSet(),
+        )
     }
 
     /**

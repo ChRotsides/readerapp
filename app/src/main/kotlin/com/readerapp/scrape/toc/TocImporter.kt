@@ -22,6 +22,8 @@ interface TocStore {
     suspend fun saveNovelInfo(novelId: Long, info: ExtractedNovelInfo?, novelUrl: String?)
     suspend fun applyToc(novelId: Long, refs: List<ChapterRef>): TocPlan
     suspend fun latestFetchedChapterUrl(novelId: Long): String?
+    /** URLs of the chapters the novel already has (used to verify a discovered TOC belongs to this novel). */
+    suspend fun existingChapterUrls(novelId: Long): List<String>
     suspend fun markTocFetched(novelId: Long, at: Long)
 }
 
@@ -33,6 +35,11 @@ sealed interface TocResult {
     data object NoTocSpec : TocResult
     data object NoNovelPage : TocResult
     data class FetchFailed(val reason: String) : TocResult
+    /**
+     * The traversal did not reach the end of the list (a later page failed, or the page limit was hit). Nothing was
+     * committed and the TOC is not marked as fetched, so it is retried later.
+     */
+    data class Incomplete(val reason: String) : TocResult
 }
 
 /**
@@ -50,8 +57,11 @@ class TocImporter @Inject constructor(
         val adapter = adapters.activeFor(novel.domain) ?: return TocResult.NoAdapter
         if (adapter.kind != AdapterKind.JSON) return TocResult.NoTocSpec
         val spec = runCatching { JsonAdapterSpec.parse(adapter.code) }.getOrNull() ?: return TocResult.NoTocSpec
+        // Same gate as chapter extraction: no regex selectors (catastrophic backtracking) from stored adapter JSON.
+        if (spec.validate().isNotEmpty()) return TocResult.NoTocSpec
         if (spec.toc == null) return TocResult.NoTocSpec
 
+        val discovered = novel.novelUrl == null
         val novelUrl = novel.novelUrl ?: discoverNovelUrl(novel) ?: return TocResult.NoNovelPage
 
         val refs = ArrayList<ChapterRef>()
@@ -59,7 +69,10 @@ class TocImporter @Inject constructor(
         var info: ExtractedNovelInfo? = null
         var next: String? = novelUrl
         var fetchedPages = 0
-        while (next != null && fetchedPages < maxPages && visited.add(UrlKey.of(next))) {
+        var incomplete: String? = null
+        while (next != null) {
+            if (fetchedPages >= maxPages) { incomplete = "more than $maxPages TOC pages"; break }
+            if (!visited.add(UrlKey.of(next))) break // the list links back to a page already read: that is its end
             val page = try {
                 pages.fetch(next)
             } catch (e: CancellationException) {
@@ -69,6 +82,7 @@ class TocImporter @Inject constructor(
             }
             if (page == null) {
                 if (fetchedPages == 0) return TocResult.FetchFailed("Could not fetch $next")
+                incomplete = "could not fetch TOC page ${fetchedPages + 1} ($next)"
                 break
             }
             fetchedPages++
@@ -81,8 +95,18 @@ class TocImporter @Inject constructor(
             refs += fresh
             next = toc.nextPageUrl
         }
+        // Only a complete traversal may re-index the novel: a partial list would renumber from zero and interleave
+        // with the chapters already stored.
+        if (incomplete != null) return TocResult.Incomplete(incomplete)
         if (refs.isEmpty()) return TocResult.FetchFailed("The novel page had no chapter links matching the adapter's TOC selector")
 
+        if (discovered) {
+            // The novel page was guessed from a chapter page; make sure it really lists this novel's chapters.
+            val known = store.existingChapterUrls(novelId).map { UrlKey.of(it) }.toHashSet()
+            if (known.isNotEmpty() && refs.none { UrlKey.of(it.url) in known }) {
+                return TocResult.FetchFailed("The discovered novel page does not list this novel's chapters")
+            }
+        }
         val ordered = TocOrder.normalize(refs)
         val plan = store.applyToc(novelId, ordered)
         store.saveNovelInfo(novelId, info, novelUrl)
@@ -94,13 +118,12 @@ class TocImporter @Inject constructor(
     private suspend fun discoverNovelUrl(novel: Novel): String? {
         val chapterUrl = store.latestFetchedChapterUrl(novel.id) ?: return null
         val page = runCatching { pages.fetch(chapterUrl) }.getOrNull() ?: return null
-        val found = NovelUrlFinder.find(page.html, page.url)
-        if (found != null) store.saveNovelInfo(novel.id, null, found)
-        return found
+        // Not persisted here: it is stored only after the TOC it points to was verified and imported.
+        return NovelUrlFinder.find(page.html, page.url)
     }
 
     companion object {
-        const val MAX_PAGES = 60
+        const val MAX_PAGES = 400
     }
 }
 
@@ -127,9 +150,11 @@ class RoomTocStore @Inject constructor(
     override suspend fun applyToc(novelId: Long, refs: List<ChapterRef>) = chapters.applyToc(novelId, refs)
 
     override suspend fun latestFetchedChapterUrl(novelId: Long): String? {
-        val novel = novels.get(novelId) ?: return null
-        return chapters.latestFetchedUrl(novel.domain)
+        return chapters.latestFetchedUrlForNovel(novelId)
     }
+
+    override suspend fun existingChapterUrls(novelId: Long): List<String> =
+        chapters.all(novelId).map { it.url }
 
     override suspend fun markTocFetched(novelId: Long, at: Long) = novels.setTocFetchedAt(novelId, at)
 }

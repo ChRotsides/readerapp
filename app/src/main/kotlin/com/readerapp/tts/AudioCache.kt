@@ -30,6 +30,13 @@ class AudioCache(private val dir: File, @Volatile var maxBytes: Long, private va
         dir.mkdirs()
     }
 
+    private val pinned = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /** Files referenced by a live playlist are never evicted while pinned (pins are counted). */
+    fun pin(name: String) { pinned.merge(name, 1, Int::plus) }
+
+    fun unpin(name: String) { pinned.computeIfPresent(name) { _, n -> if (n <= 1) null else n - 1 } }
+
     fun file(key: AudioKey): File = File(dir, key.fileName())
 
     /** A complete cached file for [key], marked as recently used; null if absent. */
@@ -59,7 +66,7 @@ class AudioCache(private val dir: File, @Volatile var maxBytes: Long, private va
         var total = files.sumOf { it.length() }
         if (total <= maxBytes) return 0
         var removed = 0
-        for (f in files.filter { it.name !in protectedNames }.sortedBy { it.lastModified() }) {
+        for (f in files.filter { it.name !in protectedNames && !pinned.containsKey(it.name) }.sortedBy { it.lastModified() }) {
             if (total <= maxBytes) break
             val len = f.length()
             if (f.delete()) {

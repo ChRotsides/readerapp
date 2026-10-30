@@ -95,6 +95,7 @@ class NovelDetailViewModel @Inject constructor(
                     TocResult.NoAdapter -> "No site adapter for this domain yet. It is created in the background after the first import."
                     TocResult.NoTocSpec -> "This site's adapter has no table-of-contents selectors."
                     TocResult.NoNovelPage -> "The novel's main page is unknown. Re-add it from its page in the browser."
+                    is TocResult.Incomplete -> "The chapter list could not be read completely (${r.reason}); nothing was changed. Try again later."
                     is TocResult.FetchFailed -> "Could not read the chapter list: ${r.reason}"
                 }
             } finally {

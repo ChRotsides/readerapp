@@ -29,7 +29,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private class MenuRequest(val rect: Rect, val onCopy: (() -> Unit)?, val onSelectAll: (() -> Unit)?)
@@ -58,28 +57,26 @@ private class AskAiTextToolbar(private val request: MutableState<MenuRequest?>) 
     }
 }
 
-/**
- * Selected text via the copy callback: remember what is on the clipboard, trigger the copy, read the selection from
- * the clipboard and put the user's previous clipboard contents back.
- */
+/** Selected text via the copy callback, confirmed through a clipboard sentinel (see [captureSelection]). */
 internal suspend fun copySelectionText(context: Context, onCopy: () -> Unit): String? {
     val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return null
-    val previous: ClipData? = runCatching { clipboard.primaryClip }.getOrNull()
-    val previousText = runCatching { previous?.getItemAt(0)?.coerceToText(context)?.toString() }.getOrNull()
-    onCopy()
-    var text: String? = null
-    // The copy is dispatched asynchronously inside the selection manager: wait until the clipboard changes.
-    // If it never changes, the selection equals what was already on the clipboard, which is fine.
-    var attempts = 0
-    while (attempts++ < 10) {
-        delay(40)
-        text = runCatching { clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString() }.getOrNull()
-        if (!text.isNullOrBlank() && text != previousText) break
+    val port = object : ClipboardPort {
+        override fun snapshot(): Any? = runCatching { clipboard.primaryClip }.getOrNull()
+        override fun readText(): String? =
+            runCatching { clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString() }.getOrNull()
+        override fun setSentinel(token: String) {
+            runCatching {
+                val clip = ClipData.newPlainText("readerapp-selection", token)
+                // Keep the temporary clip out of clipboard previews / overlays.
+                clip.description.extras = android.os.PersistableBundle().apply { putBoolean("android.content.extra.IS_SENSITIVE", true) }
+                clipboard.setPrimaryClip(clip)
+            }
+        }
+        override fun restore(snapshot: Any?) {
+            runCatching { if (snapshot is ClipData) clipboard.setPrimaryClip(snapshot) else clipboard.clearPrimaryClip() }
+        }
     }
-    runCatching {
-        if (previous != null) clipboard.setPrimaryClip(previous) else clipboard.clearPrimaryClip()
-    }
-    return text?.takeIf { it.isNotBlank() }
+    return captureSelection(port, onCopy)
 }
 
 /** Installs [AskAiTextToolbar] for [content] (a selection container) and calls [onAsk] with the highlighted text. */

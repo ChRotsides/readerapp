@@ -18,8 +18,11 @@ import com.readerapp.data.settings.SecureSettings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -73,14 +76,8 @@ class ClaudeClient @Inject constructor(
             // interrupted, so a cancelled caller would otherwise lose the result, and the cost with it.
             blockingThenRecord(
                 call = { client.messages().create(params) },
-                record = { m ->
-                    val u = m.usage()
-                    usage.record(
-                        request.model, request.purpose,
-                        effectiveInputTokens(u.inputTokens(), u.cacheCreationInputTokens().orElse(0), u.cacheReadInputTokens().orElse(0)),
-                        u.outputTokens(),
-                    )
-                },
+                record = { m -> recordAttempts(request, m.usage()._additionalProperties()["iterations"], m.model().asString(), m.usage().let { u ->
+                    effectiveInputTokens(u.inputTokens(), u.cacheCreationInputTokens().orElse(0), u.cacheReadInputTokens().orElse(0)) }, m.usage().outputTokens()) },
             )
         } catch (e: CancellationException) {
             throw e
@@ -107,40 +104,71 @@ class ClaudeClient @Inject constructor(
         return LlmResponse(text, input, output)
     }
 
+    /** Books every billable attempt of a response (server-side fallback adds attempts on other models). */
+    private suspend fun recordAttempts(request: LlmRequest, iterations: JsonValue?, served: String?, input: Long, output: Long) {
+        val plain = iterations?.let { runCatching { it.convert(Any::class.java) }.getOrNull() }
+        UsageAccounting.toRecord(plain, served, request.model, input, output).forEach {
+            runCatching { usage.record(it.model, request.purpose, it.inputTokens, it.outputTokens) }
+        }
+    }
+
     /**
-     * Streams the reply text. Usage is recorded when the stream ends (also when it fails after starting); a stop
-     * reason of refusal / max_tokens is thrown after the text that was already produced has been emitted.
+     * Streams the reply text. The response is acquired, consumed and closed inside ONE blocking IO block, so
+     * cancellation can never strand an unclosed response between coroutine contexts; a cancelled collector closes the
+     * connection immediately (interrupting the blocked read). Usage is recorded when the stream ends, also when it is
+     * interrupted: without a final usage report the output is charged conservatively from the text already streamed.
+     * A stop reason of refusal / max_tokens is thrown after the text that was already produced has been emitted.
      */
-    override fun stream(request: LlmRequest): Flow<String> = flow {
+    override fun stream(request: LlmRequest): Flow<String> = channelFlow {
         val client = client()
         val params = buildParams(request)
         var input = 0L
         var output = 0L
+        var finalUsage = false
+        var streamedBytes = 0L
+        var acquired = false
+        var served: String? = null
+        var iterations: JsonValue? = null
         var stop: StopReason? = null
         var stopExplanation: String? = null
+        val job = coroutineContext.job
         try {
-            val sr = try {
-                withContext(Dispatchers.IO) { client.messages().createStreaming(params) }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                throw translate(e)
-            }
-            sr.use { response ->
-                val events = response.stream().iterator()
-                while (withContext(Dispatchers.IO) { events.hasNext() }) {
-                    val event = withContext(Dispatchers.IO) { events.next() }
-                    event.messageStart().ifPresent { start ->
-                        val u = start.message().usage()
-                        input = effectiveInputTokens(u.inputTokens(), u.cacheCreationInputTokens().orElse(0), u.cacheReadInputTokens().orElse(0))
+            withContext(Dispatchers.IO) {
+                val sr = try {
+                    client.messages().createStreaming(params)
+                } catch (e: Exception) {
+                    throw translate(e)
+                }
+                acquired = true
+                val closer = job.invokeOnCompletion { if (it != null) runCatching { sr.close() } }
+                try {
+                    sr.use { response ->
+                        val events = response.stream().iterator()
+                        while (events.hasNext()) {
+                            ensureActive()
+                            val event = events.next()
+                            event.messageStart().ifPresent { start ->
+                                val u = start.message().usage()
+                                served = start.message().model().asString()
+                                input = effectiveInputTokens(u.inputTokens(), u.cacheCreationInputTokens().orElse(0), u.cacheReadInputTokens().orElse(0))
+                            }
+                            event.messageDelta().ifPresent { d ->
+                                output = d.usage().outputTokens()
+                                finalUsage = true
+                                d.usage()._additionalProperties()["iterations"]?.let { iterations = it }
+                                d.delta().stopReason().ifPresent { stop = it }
+                                d.delta().stopDetails().ifPresent { stopExplanation = it.explanation().orElse(null) }
+                            }
+                            val text = event.contentBlockDelta().flatMap { it.delta().text() }.map { it.text() }.orElse(null)
+                            if (!text.isNullOrEmpty()) {
+                                streamedBytes += text.toByteArray(Charsets.UTF_8).size
+                                // send() suspends the IO thread while the collector is slow; closing on cancel still works.
+                                send(text)
+                            }
+                        }
                     }
-                    event.messageDelta().ifPresent { d ->
-                        output = d.usage().outputTokens()
-                        d.delta().stopReason().ifPresent { stop = it }
-                        d.delta().stopDetails().ifPresent { stopExplanation = it.explanation().orElse(null) }
-                    }
-                    val text = event.contentBlockDelta().flatMap { it.delta().text() }.map { it.text() }.orElse(null)
-                    if (!text.isNullOrEmpty()) emit(text)
+                } finally {
+                    closer.dispose()
                 }
             }
         } catch (e: CancellationException) {
@@ -150,8 +178,12 @@ class ClaudeClient @Inject constructor(
         } catch (e: Exception) {
             throw translate(e)
         } finally {
-            if (input > 0 || output > 0) {
-                withContext(NonCancellable) { runCatching { usage.record(request.model, request.purpose, input, output) } }
+            withContext(NonCancellable) {
+                if (acquired) {
+                    if (input == 0L) input = ModelPricing.inputTokensUpperBound(ModelPricing.inputBytes(request))
+                    if (!finalUsage) output = maxOf(output, ModelPricing.outputTokensUpperBound(streamedBytes))
+                }
+                if (input > 0 || output > 0) recordAttempts(request, iterations, served, input, output)
             }
         }
         when (stop) {

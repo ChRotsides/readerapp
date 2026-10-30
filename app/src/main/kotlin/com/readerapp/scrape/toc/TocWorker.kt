@@ -29,7 +29,7 @@ class TocWorker @AssistedInject constructor(
         val novelId = inputData.getLong(KEY_NOVEL_ID, -1)
         if (novelId < 0) return Result.failure()
         return when (importer.import(novelId)) {
-            is TocResult.FetchFailed -> if (runAttemptCount < 3) Result.retry() else Result.success()
+            is TocResult.FetchFailed, is TocResult.Incomplete -> if (runAttemptCount < 4) Result.retry() else Result.success()
             else -> Result.success()
         }
     }

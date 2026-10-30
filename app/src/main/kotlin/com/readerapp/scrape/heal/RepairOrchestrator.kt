@@ -269,6 +269,10 @@ class RepairOrchestrator @Inject constructor(
                     return@repeat
                 } catch (e: LlmException.NotConfigured) {
                     return RepairOutcome.NoApiKey
+                } catch (e: LlmException.SpendCapReached) {
+                    // The pre-check passed but admission refused (this call's worst case does not fit): defer, not give up.
+                    notifier.spendCapReached(domain)
+                    return RepairOutcome.SpendCapReached
                 } catch (e: LlmException.Retryable) {
                     return RepairOutcome.Transient(e.message ?: "temporary API error")
                 } catch (e: LlmException.Refused) {
@@ -382,8 +386,8 @@ class RepairOrchestrator @Inject constructor(
         val stored = adapter.copy(fixtureId = fixtureId, status = AdapterStatus.RETIRED, lastSuccessAt = System.currentTimeMillis())
         store.save(stored)
         if (!store.swapActive(adapter.domain, expectedActive, stored.version, AdapterStatus.BROKEN)) return RepairOutcome.Stale
-        // A BROKEN predecessor that was not ACTIVE any more stays BROKEN (never reverts to a usable state).
-        previous?.let { store.setStatus(it.domain, it.version, AdapterStatus.BROKEN) }
+        // The predecessor was retired inside the compare-and-swap; no unconditional write may follow it (a user
+        // could have re-activated that version in the meantime and must not see it flipped to BROKEN).
         val saved = stored.copy(status = AdapterStatus.ACTIVE)
         clearState(adapter.domain, "Now v${saved.version} (${saved.writtenBy})")
         return RepairOutcome.Fixed(saved)

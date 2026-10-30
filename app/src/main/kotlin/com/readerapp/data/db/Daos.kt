@@ -105,6 +105,9 @@ interface ChapterDao {
     @Query("UPDATE chapters SET chapterIndex = chapterIndex + :by WHERE novelId = :novelId AND chapterIndex >= :from")
     suspend fun shiftFrom(novelId: Long, from: Int, by: Int)
 
+    @Query("DELETE FROM chapters WHERE id = :id")
+    suspend fun delete(id: Long)
+
     @Query("UPDATE chapters SET chapterIndex = :index, title = :title WHERE id = :id")
     suspend fun setIndexAndTitle(id: Long, index: Int, title: String)
 
@@ -154,6 +157,10 @@ interface ChapterDao {
         """,
     )
     suspend fun latestFetchedUrl(domain: String): String?
+
+    /** The most recently fetched chapter URL of this one novel. */
+    @Query("SELECT url FROM chapters WHERE novelId = :novelId AND status = 'FETCHED' ORDER BY fetchedAt DESC, id DESC LIMIT 1")
+    suspend fun latestFetchedUrlForNovel(novelId: Long): String?
 }
 
 @Dao
@@ -205,6 +212,10 @@ interface ArcSummaryDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(arc: ArcSummary)
+
+    /** Drops arcs that reach [fromIndex] or later: their chapters may have moved (re-indexing). */
+    @Query("DELETE FROM arc_summaries WHERE novelId = :novelId AND endIndex >= :fromIndex")
+    suspend fun deleteFrom(novelId: Long, fromIndex: Int)
 }
 
 @Dao

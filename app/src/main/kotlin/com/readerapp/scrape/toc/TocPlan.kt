@@ -18,28 +18,60 @@ data class TocUpdate(val chapterId: Long, val index: Int, val title: String)
 
 data class TocInsert(val url: String, val index: Int, val title: String)
 
-/** What applying a table of contents to a novel's existing chapters changes. */
-data class TocPlan(val updates: List<TocUpdate>, val inserts: List<TocInsert>) {
+/**
+ * What applying a table of contents to a novel's existing chapters changes.
+ * [deletes] are leftover placeholders (never fetched, never read) the TOC does not list; every other existing chapter
+ * the TOC does not list is kept and appended after the TOC, in its old relative order (see [compute]).
+ */
+data class TocPlan(val updates: List<TocUpdate>, val inserts: List<TocInsert>, val deletes: List<Long> = emptyList()) {
+    /** Smallest reading position (old or new) whose occupant changed; arcs ending at or after it are stale. */
+    fun firstAffectedIndex(existing: List<Chapter>): Int? {
+        val old = existing.associateBy { it.id }
+        val moved = updates.mapNotNull { u -> old[u.chapterId]?.takeIf { it.index != u.index }?.let { minOf(it.index, u.index) } }
+        return (moved + inserts.map { it.index } + deletes.mapNotNull { old[it]?.index }).minOrNull()
+    }
+
     companion object {
-        /** Index = position in [refs] (reading order). Existing chapters keep their id, text, status and read state. */
+        /**
+         * Index = position in [refs] (reading order). Existing chapters keep their id, text, status and read state.
+         * Existing chapters the TOC does not list are reconciled explicitly instead of being left at their old
+         * indices (where they would interleave with the imported ones): placeholders that carry no user data are
+         * dropped, the rest are appended after the TOC keeping their relative order.
+         */
         fun compute(existing: List<Chapter>, refs: List<ChapterRef>): TocPlan {
             val byKey = existing.associateBy { UrlKey.of(it.url) }
             val seen = HashSet<String>()
             val updates = ArrayList<TocUpdate>()
             val inserts = ArrayList<TocInsert>()
+            val matched = HashSet<Long>()
+            var total = 0
             refs.forEachIndexed { position, ref ->
                 val key = UrlKey.of(ref.url)
                 if (!seen.add(key)) return@forEachIndexed
+                total = position + 1
                 val title = ref.title.orEmpty()
                 val match = byKey[key]
                 if (match == null) {
                     inserts += TocInsert(ref.url, position, title)
                 } else {
+                    matched += match.id
                     val newTitle = match.title.ifBlank { title }
                     if (match.index != position || newTitle != match.title) updates += TocUpdate(match.id, position, newTitle)
                 }
             }
-            return TocPlan(updates, inserts)
+            val deletes = ArrayList<Long>()
+            var next = total
+            existing.filter { it.id !in matched }.sortedWith(compareBy({ it.index }, { it.id })).forEach { c ->
+                val disposable = c.status == com.readerapp.data.db.ChapterStatus.NOT_FETCHED && !c.read &&
+                    c.scrollIndex == 0 && c.scrollOffset == 0
+                if (disposable) {
+                    deletes += c.id
+                } else {
+                    if (c.index != next) updates += TocUpdate(c.id, next, c.title)
+                    next++
+                }
+            }
+            return TocPlan(updates, inserts, deletes)
         }
     }
 }

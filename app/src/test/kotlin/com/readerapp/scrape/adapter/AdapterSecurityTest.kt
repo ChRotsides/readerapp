@@ -36,6 +36,16 @@ class AdapterUrlsTest {
         assertNull(AdapterUrls.sameSite("http://[bad", page))
     }
 
+    @Test fun privateSuffixTenantsAreDifferentSites() {
+        assertEquals("novel.blogspot.com", AdapterUrls.registrableDomain("www.novel.blogspot.com"))
+        assertEquals("me.github.io", AdapterUrls.registrableDomain("me.github.io"))
+        assertNull(AdapterUrls.sameSite("https://attacker.blogspot.com/x?d=1", "https://novel.blogspot.com/c/1"))
+        assertNull(AdapterUrls.sameSite("https://evil.github.io/", "https://me.github.io/c/1"))
+        assertEquals("https://me.github.io/c/2", AdapterUrls.sameSite("/c/2", "https://me.github.io/c/1"))
+        assertEquals("https://m.novel.blogspot.com/c/2", AdapterUrls.sameSite("https://m.novel.blogspot.com/c/2", "https://novel.blogspot.com/c/1"))
+        assertEquals("localhost", AdapterUrls.registrableDomain("localhost"))
+    }
+
     @Test fun registrableDomainHandlesCoUkStyleSuffixes() {
         assertEquals("example.co.uk", AdapterUrls.registrableDomain("a.b.example.co.uk"))
         assertEquals("example.com", AdapterUrls.registrableDomain("a.example.com"))

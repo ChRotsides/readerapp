@@ -63,11 +63,18 @@ class ProcessWorker @AssistedInject constructor(
             return Result.success()
         }
 
-        val window = listOf(anchor) + chapters.nextN(anchor, settings.currentProcessAhead())
-        for (chapter in window) {
+        // The window is walked one successor at a time: fetching a chapter may create the placeholder for the next
+        // one (discovered through next links), which a list read up front would never contain.
+        val ahead = settings.currentProcessAhead()
+        var cursor = anchor
+        for (position in 0..ahead) {
+            val chapter = if (position == 0) anchor else chapters.next(cursor) ?: break
             if (spend.capReached()) return pausedByCap()
+            cursor = chapter
             if (chapter.status != ChapterStatus.FETCHED || chapters.getText(chapter.id) == null) {
-                if (fetcher.ensureFetched(chapter.id) !is FetchOutcome.Success) break // the chain beyond is unknown/locked
+                val fetched = fetcher.ensureFetched(chapter.id)
+                if (fetched !is FetchOutcome.Success) break // the chain beyond is unknown/locked
+                cursor = fetched.chapter
             }
             when (val outcome = processor.process(chapter.id, variant)) {
                 is ProcessOutcome.Retry -> return Result.retry()

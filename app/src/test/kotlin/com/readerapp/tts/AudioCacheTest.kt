@@ -92,4 +92,21 @@ class AudioCacheTest {
         assertEquals(1_000, WavWriter.durationMs(f))
         assertNotEquals(0L, f.length())
     }
+
+    @Test
+    fun pinnedFilesSurviveEvictionUntilUnpinned() {
+        val c = cache(100)
+        val oldest = write(c, key(0), 400)
+        write(c, key(1), 400)
+        c.pin(oldest.name)
+        c.pin(oldest.name)
+        c.evict()
+        assertTrue(oldest.exists())
+        c.unpin(oldest.name)
+        c.evict()
+        assertTrue("still pinned once", oldest.exists())
+        c.unpin(oldest.name)
+        c.evict()
+        assertFalse(oldest.exists())
+    }
 }

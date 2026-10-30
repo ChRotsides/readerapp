@@ -56,9 +56,9 @@ class GuardedLlmClient(
     private suspend fun admit(request: LlmRequest): Long {
         if (spend.capReached()) throw LlmException.SpendCapReached()
         val reservations = reservations ?: return 0
-        val chars = request.system.length + request.user.length + (request.context?.length ?: 0) +
-            request.history.sumOf { it.first.length + it.second.length } + (request.jsonSchema?.length ?: 0)
-        val estimate = ModelPricing.estimateMaxMicros(request.model, chars, request.maxTokens)
+        val estimate = ModelPricing.estimateMaxMicros(
+            request.model, ModelPricing.inputBytes(request), request.maxTokens, fallback = request.serverFallback,
+        )
         if (!reservations.tryReserve(estimate)) throw LlmException.SpendCapReached()
         return estimate
     }

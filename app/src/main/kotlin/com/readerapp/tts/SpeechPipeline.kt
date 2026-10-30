@@ -64,6 +64,38 @@ interface PlaylistSink {
     suspend fun clear()
 }
 
+/**
+ * Bounded mirror of the player's playlist: items already played are dropped from the head once more than
+ * [keepBehind] of them sit behind the playhead. [trimmed] counts the dropped ones, so `trimmed + index` is the
+ * playhead's absolute position in the generation order (what [SpeechPipeline.playhead] expects).
+ */
+class PlaylistWindow(private val keepBehind: Int) {
+    val items = ArrayList<ReadyItem>()
+    var trimmed = 0
+        private set
+
+    fun append(item: ReadyItem) { items += item }
+
+    fun clear() { items.clear(); trimmed = 0 }
+
+    fun absolute(index: Int): Int = trimmed + index
+
+    /** How many head items may be dropped now that item [current] is playing. */
+    fun excess(current: Int): Int = (current - keepBehind).coerceAtLeast(0)
+
+    /** Drops the first [n] items and returns them. */
+    fun drop(n: Int): List<ReadyItem> {
+        val k = n.coerceIn(0, items.size)
+        val gone = items.subList(0, k).toList()
+        items.subList(0, k).clear()
+        trimmed += k
+        return gone
+    }
+
+    /** True when something before the window's first item was dropped (going back needs regeneration). */
+    val hasTrimmedHead: Boolean get() = trimmed > 0
+}
+
 sealed interface PipelineEvent {
     /** Nothing more will be generated: end of the book, or the next chapter is unavailable ([reason] != null). */
     data class Finished(val reason: String?) : PipelineEvent
