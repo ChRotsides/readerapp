@@ -12,6 +12,8 @@ data class ExtractedChapter(
     val paragraphs: List<String>,
     val nextUrl: String?,
     val prevUrl: String?,
+    /** Link to the novel's main page (breadcrumb / "table of contents" link), when the extractor found one. */
+    val novelUrl: String? = null,
 )
 
 data class ExtractedNovelInfo(

@@ -31,6 +31,7 @@ object AppModule {
     @Provides fun chapterTextDao(db: AppDatabase) = db.chapterTextDao()
     @Provides fun glossaryDao(db: AppDatabase) = db.glossaryDao()
     @Provides fun chapterSummaryDao(db: AppDatabase) = db.chapterSummaryDao()
+    @Provides fun arcSummaryDao(db: AppDatabase) = db.arcSummaryDao()
     @Provides fun adapterDao(db: AppDatabase) = db.adapterDao()
     @Provides fun domainStateDao(db: AppDatabase) = db.domainStateDao()
     @Provides fun aiUsageDao(db: AppDatabase) = db.aiUsageDao()

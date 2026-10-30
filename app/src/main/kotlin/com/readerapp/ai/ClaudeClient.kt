@@ -7,13 +7,19 @@ import com.anthropic.errors.AnthropicIoException
 import com.anthropic.errors.AnthropicServiceException
 import com.anthropic.errors.InternalServerException
 import com.anthropic.errors.RateLimitException
+import com.anthropic.models.messages.CacheControlEphemeral
+import com.anthropic.models.messages.ContentBlockParam
 import com.anthropic.models.messages.JsonOutputFormat
 import com.anthropic.models.messages.MessageCreateParams
 import com.anthropic.models.messages.OutputConfig
 import com.anthropic.models.messages.StopReason
+import com.anthropic.models.messages.TextBlockParam
 import com.readerapp.data.settings.SecureSettings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -65,20 +71,16 @@ class ClaudeClient @Inject constructor(
             withContext(Dispatchers.IO) { client.messages().create(params) }
         } catch (e: CancellationException) {
             throw e
-        } catch (e: RateLimitException) {
-            throw LlmException.Retryable("Rate limited by the Anthropic API", e)
-        } catch (e: InternalServerException) {
-            throw LlmException.Retryable("Anthropic API server error (${e.statusCode()})", e)
-        } catch (e: AnthropicIoException) {
-            throw LlmException.Retryable("Network error talking to the Anthropic API", e)
         } catch (e: AnthropicServiceException) {
             // 4xx (bad request, auth, permission, not found, ...) will not succeed on retry. 529 overloaded is retryable.
-            if (e.statusCode() == 529) throw LlmException.Retryable("Anthropic API overloaded", e)
-            throw LlmException.Rejected("Anthropic API error ${e.statusCode()}: ${e.message}", e)
+            throw translate(e)
+        } catch (e: AnthropicIoException) {
+            throw translate(e)
         }
 
-        val input = message.usage().inputTokens()
-        val output = message.usage().outputTokens()
+        val u = message.usage()
+        val input = effectiveInputTokens(u.inputTokens(), u.cacheCreationInputTokens().orElse(0), u.cacheReadInputTokens().orElse(0))
+        val output = u.outputTokens()
         // Tokens were spent whatever the outcome, so record before inspecting the stop reason.
         runCatching { usage.record(request.model, request.purpose, input, output) }
 
@@ -95,6 +97,70 @@ class ClaudeClient @Inject constructor(
         return LlmResponse(text, input, output)
     }
 
+    /**
+     * Streams the reply text. Usage is recorded when the stream ends (also when it fails after starting); a stop
+     * reason of refusal / max_tokens is thrown after the text that was already produced has been emitted.
+     */
+    override fun stream(request: LlmRequest): Flow<String> = flow {
+        val client = client()
+        val params = buildParams(request)
+        var input = 0L
+        var output = 0L
+        var stop: StopReason? = null
+        var stopExplanation: String? = null
+        try {
+            val sr = try {
+                withContext(Dispatchers.IO) { client.messages().createStreaming(params) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                throw translate(e)
+            }
+            sr.use { response ->
+                val events = response.stream().iterator()
+                while (withContext(Dispatchers.IO) { events.hasNext() }) {
+                    val event = withContext(Dispatchers.IO) { events.next() }
+                    event.messageStart().ifPresent { start ->
+                        val u = start.message().usage()
+                        input = effectiveInputTokens(u.inputTokens(), u.cacheCreationInputTokens().orElse(0), u.cacheReadInputTokens().orElse(0))
+                    }
+                    event.messageDelta().ifPresent { d ->
+                        output = d.usage().outputTokens()
+                        d.delta().stopReason().ifPresent { stop = it }
+                        d.delta().stopDetails().ifPresent { stopExplanation = it.explanation().orElse(null) }
+                    }
+                    val text = event.contentBlockDelta().flatMap { it.delta().text() }.map { it.text() }.orElse(null)
+                    if (!text.isNullOrEmpty()) emit(text)
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: LlmException) {
+            throw e
+        } catch (e: Exception) {
+            throw translate(e)
+        } finally {
+            if (input > 0 || output > 0) {
+                withContext(kotlinx.coroutines.NonCancellable) { runCatching { usage.record(request.model, request.purpose, input, output) } }
+            }
+        }
+        when (stop) {
+            StopReason.REFUSAL -> throw LlmException.Refused(stopExplanation ?: "no details")
+            StopReason.MAX_TOKENS, StopReason.MODEL_CONTEXT_WINDOW_EXCEEDED -> throw LlmException.Truncated()
+            else -> Unit
+        }
+    }.flowOn(Dispatchers.Default)
+
+    private fun translate(e: Exception): Exception = when (e) {
+        is RateLimitException -> LlmException.Retryable("Rate limited by the Anthropic API", e)
+        is InternalServerException -> LlmException.Retryable("Anthropic API server error (${e.statusCode()})", e)
+        is AnthropicIoException -> LlmException.Retryable("Network error talking to the Anthropic API", e)
+        is AnthropicServiceException ->
+            if (e.statusCode() == 529) LlmException.Retryable("Anthropic API overloaded", e)
+            else LlmException.Rejected("Anthropic API error ${e.statusCode()}: ${e.message}", e)
+        else -> e
+    }
+
     private fun buildParams(request: LlmRequest): MessageCreateParams {
         val effort = when (request.effort) {
             LlmEffort.LOW -> OutputConfig.Effort.LOW
@@ -109,13 +175,41 @@ class ClaudeClient @Inject constructor(
             }
             output.format(JsonOutputFormat.builder().schema(schema.build()).build())
         }
-        return MessageCreateParams.builder()
+        val builder = MessageCreateParams.builder()
             .model(request.model)
             .maxTokens(request.maxTokens)
-            .system(request.system)
-            .addUserMessage(request.user)
             .outputConfig(output.build())
-            .build()
+        if (request.cacheSystem) {
+            builder.systemOfTextBlockParams(listOf(textBlock(request.system, cache = true)))
+        } else {
+            builder.system(request.system)
+        }
+        // Conversation: [context (cached) + first question], assistant, question, ..., newest question.
+        val questions = request.history.map { it.first } + request.user
+        questions.forEachIndexed { i, q ->
+            if (i == 0 && request.context != null) {
+                builder.addUserMessageOfContentBlockParams(
+                    listOf(
+                        ContentBlockParam.ofText(textBlock(request.context, cache = true)),
+                        ContentBlockParam.ofText(textBlock(q, cache = false)),
+                    ),
+                )
+            } else {
+                builder.addUserMessage(q)
+            }
+            request.history.getOrNull(i)?.let { builder.addAssistantMessage(it.second) }
+        }
+        if (request.serverFallback) {
+            builder.putAdditionalHeader("anthropic-beta", FALLBACK_BETA)
+            builder.putAdditionalBodyProperty("fallbacks", JsonValue.from("default"))
+        }
+        return builder.build()
+    }
+
+    private fun textBlock(text: String, cache: Boolean): TextBlockParam {
+        val b = TextBlockParam.builder().text(text)
+        if (cache) b.cacheControl(CacheControlEphemeral.builder().build())
+        return b.build()
     }
 
     private fun toJsonValue(e: JsonElement): JsonValue = when (e) {
@@ -128,5 +222,13 @@ class ClaudeClient @Inject constructor(
             e.longOrNull != null -> JsonValue.from(e.longOrNull)
             else -> JsonValue.from(e.content.toDouble())
         }
+    }
+
+    companion object {
+        const val FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+        /** Cache writes cost 1.25x and cache reads 0.1x the input price; fold them into one input-token figure. */
+        fun effectiveInputTokens(input: Long, cacheWrite: Long, cacheRead: Long): Long =
+            input + Math.round(cacheWrite * 1.25 + cacheRead * 0.1)
     }
 }

@@ -32,6 +32,7 @@ data class JsonAdapterSpec(
         chapter.remove.forEachIndexed { i, s -> selector("chapter.remove[$i]", s) }
         selector("chapter.next", chapter.next)
         selector("chapter.prev", chapter.prev)
+        selector("chapter.novelLink", chapter.novelLink)
         novel?.let {
             selector("novel.title", it.title); selector("novel.author", it.author)
             selector("novel.cover", it.cover); selector("novel.synopsis", it.synopsis)
@@ -72,6 +73,8 @@ data class ChapterSpec(
     /** Link (or element containing a link) to the next / previous chapter; its href is used. */
     val next: String? = null,
     val prev: String? = null,
+    /** Link to the novel's main page (breadcrumb or "table of contents" link) on the chapter page. */
+    val novelLink: String? = null,
 )
 
 @Serializable

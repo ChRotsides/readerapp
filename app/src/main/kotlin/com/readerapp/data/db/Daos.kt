@@ -48,6 +48,19 @@ interface NovelDao {
 
     @Query("DELETE FROM novels WHERE id = :id")
     suspend fun delete(id: Long)
+
+    @Query("UPDATE novels SET autoProcess = :mode, targetLanguage = :target, translateWithSonnet = :sonnet, language = :language WHERE id = :id")
+    suspend fun setAiSettings(id: Long, mode: AutoProcessMode, target: String?, sonnet: Boolean, language: String?)
+
+    @Query("UPDATE novels SET novelUrl = :url WHERE id = :id")
+    suspend fun setNovelUrl(id: Long, url: String?)
+
+    @Query("UPDATE novels SET tocFetchedAt = :at WHERE id = :id")
+    suspend fun setTocFetchedAt(id: Long, at: Long)
+
+    /** Novels of [domain] that know their novel page but never imported a table of contents. */
+    @Query("SELECT * FROM novels WHERE domain = :domain AND tocFetchedAt IS NULL")
+    suspend fun withoutToc(domain: String): List<Novel>
 }
 
 @Dao
@@ -84,6 +97,23 @@ interface ChapterDao {
 
     @Query("SELECT * FROM chapters WHERE novelId = :novelId AND status = 'NOT_FETCHED' AND (chapterIndex > :index OR (chapterIndex = :index AND id > :id)) ORDER BY chapterIndex, id LIMIT 1")
     suspend fun nextUnfetchedAfter(novelId: Long, index: Int, id: Long): Chapter?
+
+    @Query("SELECT * FROM chapters WHERE novelId = :novelId")
+    suspend fun all(novelId: Long): List<Chapter>
+
+    @Query("UPDATE chapters SET chapterIndex = :index, title = :title WHERE id = :id")
+    suspend fun setIndexAndTitle(id: Long, index: Int, title: String)
+
+    /** The [limit] chapters after the given one in reading order. */
+    @Query("SELECT * FROM chapters WHERE novelId = :novelId AND (chapterIndex > :index OR (chapterIndex = :index AND id > :id)) ORDER BY chapterIndex, id LIMIT :limit")
+    suspend fun nextN(novelId: Long, index: Int, id: Long, limit: Int): List<Chapter>
+
+    @Query("SELECT * FROM chapters WHERE novelId = :novelId AND chapterIndex BETWEEN :from AND :to ORDER BY chapterIndex, id")
+    suspend fun inRange(novelId: Long, from: Int, to: Int): List<Chapter>
+
+    /** Fetched chapters strictly before [index], nearest first. */
+    @Query("SELECT * FROM chapters WHERE novelId = :novelId AND status = 'FETCHED' AND chapterIndex < :index ORDER BY chapterIndex DESC, id DESC LIMIT :limit")
+    suspend fun fetchedBefore(novelId: Long, index: Int, limit: Int): List<Chapter>
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(chapter: Chapter): Long
@@ -130,6 +160,9 @@ interface ChapterTextDao {
     @Query("SELECT * FROM chapter_texts WHERE chapterId = :chapterId")
     fun observeAll(chapterId: Long): Flow<List<ChapterText>>
 
+    @Query("SELECT * FROM chapter_texts WHERE chapterId = :chapterId")
+    suspend fun all(chapterId: Long): List<ChapterText>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(text: ChapterText)
 
@@ -148,14 +181,51 @@ interface GlossaryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entry: GlossaryEntry): Long
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(entries: List<GlossaryEntry>)
+
     @Query("DELETE FROM glossary_entries WHERE id = :id")
     suspend fun delete(id: Long)
+}
+
+/** A chapter summary together with the chapter's ordering index. */
+data class IndexedSummary(val chapterId: Long, val chapterIndex: Int, val summary: String)
+
+@Dao
+interface ArcSummaryDao {
+    @Query("SELECT * FROM arc_summaries WHERE novelId = :novelId ORDER BY arcIndex")
+    suspend fun forNovel(novelId: Long): List<ArcSummary>
+
+    @Query("SELECT * FROM arc_summaries WHERE novelId = :novelId AND arcIndex = :arcIndex")
+    suspend fun get(novelId: Long, arcIndex: Int): ArcSummary?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(arc: ArcSummary)
 }
 
 @Dao
 interface ChapterSummaryDao {
     @Query("SELECT * FROM chapter_summaries WHERE chapterId = :chapterId")
     suspend fun get(chapterId: Long): ChapterSummary?
+
+    /** Summaries of chapters of the novel with index strictly below [index] (spoiler-safe), in reading order. */
+    @Query(
+        """
+        SELECT s.chapterId AS chapterId, c.chapterIndex AS chapterIndex, s.summary AS summary
+        FROM chapter_summaries s JOIN chapters c ON c.id = s.chapterId
+        WHERE c.novelId = :novelId AND c.chapterIndex < :index ORDER BY c.chapterIndex, c.id
+        """,
+    )
+    suspend fun indexedBefore(novelId: Long, index: Int): List<IndexedSummary>
+
+    @Query(
+        """
+        SELECT s.chapterId AS chapterId, c.chapterIndex AS chapterIndex, s.summary AS summary
+        FROM chapter_summaries s JOIN chapters c ON c.id = s.chapterId
+        WHERE c.novelId = :novelId AND c.chapterIndex BETWEEN :from AND :to ORDER BY c.chapterIndex, c.id
+        """,
+    )
+    suspend fun indexedInRange(novelId: Long, from: Int, to: Int): List<IndexedSummary>
 
     /** Spoiler-safe: summaries for chapters of the novel up to (and including) [maxIndex]. */
     @Query(

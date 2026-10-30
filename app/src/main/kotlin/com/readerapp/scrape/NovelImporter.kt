@@ -5,6 +5,8 @@ import com.readerapp.data.repo.AdapterStore
 import com.readerapp.data.repo.ChapterRepository
 import com.readerapp.data.repo.NovelRepository
 import com.readerapp.scrape.heal.RepairScheduler
+import com.readerapp.scrape.toc.NovelUrlFinder
+import com.readerapp.scrape.toc.TocScheduler
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -28,6 +30,7 @@ class NovelImporter @Inject constructor(
     private val chapters: ChapterRepository,
     private val adapters: AdapterStore,
     private val scheduler: RepairScheduler,
+    private val toc: TocScheduler,
 ) {
     suspend fun prepare(page: FetchedPage): Result<ImportDraft> =
         when (val result = extractor.extract(page)) {
@@ -45,7 +48,9 @@ class NovelImporter @Inject constructor(
         val page = draft.page
         val chapterData = draft.extraction.chapter
         val title = novelTitle.trim().ifEmpty { draft.suggestedTitle }
-        maybeScheduleAdapterGeneration(page.url)
+        // The novel's main page: the adapter's novelLink if it has one, else breadcrumb / "contents" link heuristics.
+        val novelUrl = chapterData.novelUrl ?: runCatching { NovelUrlFinder.find(page.html, page.url) }.getOrNull()
+        maybeScheduleAdapterGeneration(page.url, novelUrl)
 
         chapters.findAnyByUrl(page.url)?.let { existing ->
             if (existing.status != com.readerapp.data.db.ChapterStatus.FETCHED) {
@@ -65,12 +70,16 @@ class NovelImporter @Inject constructor(
                 synopsis = info?.synopsis,
                 sourceUrl = page.url,
                 domain = domain,
+                novelUrl = novelUrl,
             ),
         )
+        if (existingNovel != null && existingNovel.novelUrl == null && novelUrl != null) novels.setNovelUrl(novelId, novelUrl)
 
         val index = if (existingNovel == null) 0 else indexInExisting(novelId, chapterData)
         val chapter = chapters.insertIfAbsent(novelId, page.url, index, chapterData.title.orEmpty())
         chapters.storeFetched(chapter, chapterData.title, chapterData.paragraphs, chapterData.nextUrl, chapterData.prevUrl)
+        // Runs now when the domain's active adapter has TOC selectors; otherwise again once an adapter is generated.
+        if (novelUrl != null || existingNovel?.novelUrl != null) toc.schedule(novelId)
         return ImportResult.Imported(novelId, chapter.id)
     }
 
@@ -78,11 +87,11 @@ class NovelImporter @Inject constructor(
      * New domain (no adapter version yet, and generation has not already been given up on): a background job asks
      * Sonnet to write v1. Until it finishes the generic extractor is used.
      */
-    private suspend fun maybeScheduleAdapterGeneration(pageUrl: String) {
+    private suspend fun maybeScheduleAdapterGeneration(pageUrl: String, novelUrl: String?) {
         val domain = DomainRateLimiter.domainOf(pageUrl)
         if (adapters.versions(domain).isNotEmpty()) return
         if (adapters.domainState(domain)?.genericFallback == true) return
-        scheduler.scheduleGeneration(domain, pageUrl, null)
+        scheduler.scheduleGeneration(domain, pageUrl, novelUrl)
     }
 
     private suspend fun indexInExisting(novelId: Long, data: ExtractedChapter): Int {

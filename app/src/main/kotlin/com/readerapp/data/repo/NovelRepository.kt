@@ -1,5 +1,6 @@
 package com.readerapp.data.repo
 
+import com.readerapp.data.db.AutoProcessMode
 import com.readerapp.data.db.Novel
 import com.readerapp.data.db.NovelDao
 import com.readerapp.data.db.NovelWithProgress
@@ -24,6 +25,23 @@ class NovelRepository @Inject constructor(private val dao: NovelDao) {
 
     suspend fun setLastRead(novelId: Long, chapterId: Long, scrollPos: Int = 0) =
         dao.setLastRead(novelId, chapterId, scrollPos, System.currentTimeMillis())
+
+    suspend fun setAiSettings(
+        novelId: Long,
+        mode: AutoProcessMode,
+        targetLanguage: String?,
+        translateWithSonnet: Boolean,
+        sourceLanguage: String?,
+    ) = dao.setAiSettings(
+        novelId, mode, targetLanguage?.trim()?.takeIf { it.isNotEmpty() }, translateWithSonnet,
+        sourceLanguage?.trim()?.takeIf { it.isNotEmpty() },
+    )
+
+    suspend fun setNovelUrl(novelId: Long, url: String?) = dao.setNovelUrl(novelId, url)
+
+    suspend fun setTocFetchedAt(novelId: Long, at: Long) = dao.setTocFetchedAt(novelId, at)
+
+    suspend fun withoutToc(domain: String): List<Novel> = dao.withoutToc(domain)
 
     /** Deletes the novel; chapters, texts, glossary and summaries cascade. */
     suspend fun delete(id: Long) = dao.delete(id)

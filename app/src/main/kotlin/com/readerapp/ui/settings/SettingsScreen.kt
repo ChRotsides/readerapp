@@ -48,6 +48,8 @@ fun SettingsScreen(onBack: () -> Unit, onOpenAdapters: () -> Unit, viewModel: Se
     val prefs by viewModel.prefs.collectAsStateWithLifecycle()
     val cap by viewModel.monthlyCapUsd.collectAsStateWithLifecycle()
     val spent by viewModel.monthToDateUsd.collectAsStateWithLifecycle()
+    val targetLanguage by viewModel.targetLanguage.collectAsStateWithLifecycle()
+    val processAhead by viewModel.processAhead.collectAsStateWithLifecycle()
 
     Scaffold(
         topBar = {
@@ -80,11 +82,19 @@ fun SettingsScreen(onBack: () -> Unit, onOpenAdapters: () -> Unit, viewModel: Se
             Text("AI spending", style = MaterialTheme.typography.titleMedium)
             Text(
                 "Spent this month: ${"$%.4f".format(spent)} of ${"$%.2f".format(cap)}. " +
-                    "Adapter generation and repair stop when the cap is reached.",
+                    "Adapter generation, repair, chapter processing, summaries and Ask AI stop when the cap is reached.",
                 style = MaterialTheme.typography.bodyMedium,
             )
             CapField(cap, onSave = viewModel::setMonthlyCap)
             OutlinedButton(onClick = onOpenAdapters) { Text("Site adapters") }
+            TargetLanguageField(targetLanguage, onSave = viewModel::setTargetLanguage)
+            Text("Process ahead: $processAhead chapters (auto fix / translate queue)", style = MaterialTheme.typography.labelLarge)
+            Slider(
+                value = processAhead.toFloat(),
+                onValueChange = { viewModel.setProcessAhead(it.toInt()) },
+                valueRange = 0f..20f,
+                steps = 19,
+            )
 
             HorizontalDivider()
             Text("Reader", style = MaterialTheme.typography.titleMedium)
@@ -153,5 +163,21 @@ private fun CapField(capUsd: Double, onSave: (Double) -> Unit) {
             modifier = Modifier.weight(1f),
         )
         OutlinedButton(enabled = parsed != null, onClick = { parsed?.let(onSave); input = "" }) { Text("Save") }
+    }
+}
+
+@Composable
+private fun TargetLanguageField(current: String, onSave: (String) -> Unit) {
+    var input by remember { mutableStateOf("") }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            value = input,
+            onValueChange = { input = it },
+            label = { Text("Default translation language") },
+            placeholder = { Text(current) },
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+        )
+        OutlinedButton(enabled = input.isNotBlank(), onClick = { onSave(input); input = "" }) { Text("Save") }
     }
 }

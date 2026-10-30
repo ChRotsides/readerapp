@@ -37,6 +37,13 @@ class Converters {
     @TypeConverter
     fun stringToAdapterStatus(value: String): AdapterStatus = AdapterStatus.valueOf(value)
 
+    @TypeConverter
+    fun autoProcessToString(value: AutoProcessMode): String = value.name
+
+    @TypeConverter
+    fun stringToAutoProcess(value: String): AutoProcessMode =
+        runCatching { AutoProcessMode.valueOf(value) }.getOrDefault(AutoProcessMode.OFF)
+
     private companion object {
         val stringList = ListSerializer(String.serializer())
     }

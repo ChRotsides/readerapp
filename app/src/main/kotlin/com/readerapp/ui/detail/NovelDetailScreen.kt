@@ -26,6 +26,20 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.outlined.CloudQueue
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import com.readerapp.data.db.AutoProcessMode
+import com.readerapp.data.db.Novel
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -57,10 +71,16 @@ fun NovelDetailScreen(
     onBack: () -> Unit,
     onOpenChapter: (Long) -> Unit,
     onOpenInBrowser: (String) -> Unit,
+    onOpenGlossary: (Long) -> Unit,
     viewModel: NovelDetailViewModel = hiltViewModel(),
 ) {
     val novel by viewModel.novel.collectAsStateWithLifecycle()
     val chapters by viewModel.chapters.collectAsStateWithLifecycle()
+    val refreshing by viewModel.refreshing.collectAsStateWithLifecycle()
+    val message by viewModel.message.collectAsStateWithLifecycle()
+    val defaultTarget by viewModel.defaultTargetLanguage.collectAsStateWithLifecycle()
+    val snackbar = remember { SnackbarHostState() }
+    LaunchedEffect(message) { message?.let { snackbar.showSnackbar(it); viewModel.messageShown() } }
 
     Scaffold(
         topBar = {
@@ -74,6 +94,7 @@ fun NovelDetailScreen(
                 },
             )
         },
+        snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
         val n = novel ?: return@Scaffold
         LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(bottom = 24.dp)) {
@@ -109,6 +130,17 @@ fun NovelDetailScreen(
                         Text("Download ahead")
                     }
                 }
+                OutlinedButton(
+                    onClick = viewModel::refreshChapterList,
+                    enabled = !refreshing,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                ) {
+                    if (refreshing) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Filled.Refresh, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (refreshing) "Refreshing..." else "Refresh chapter list")
+                }
+                AiSection(n, defaultTarget, viewModel::saveAiSettings, onOpenGlossary = { onOpenGlossary(n.id) })
                 HorizontalDivider()
             }
             itemsIndexed(chapters, key = { _, c -> c.id }) { position, chapter ->
@@ -142,4 +174,48 @@ private fun statusVisual(status: ChapterStatus): Pair<ImageVector, String> = whe
     ChapterStatus.NOT_FETCHED -> Icons.Outlined.CloudQueue to "Not downloaded"
     ChapterStatus.LOCKED -> Icons.Filled.Lock to "Locked (login/payment required)"
     ChapterStatus.FAILED -> Icons.Filled.ErrorOutline to "Failed - tap to retry"
+}
+
+/** Per-novel AI processing settings: auto-process mode, target / source language, translation model, glossary. */
+@Composable
+private fun AiSection(
+    novel: Novel,
+    defaultTarget: String,
+    onSave: (AutoProcessMode, String, Boolean, String) -> Unit,
+    onOpenGlossary: () -> Unit,
+) {
+    var target by remember(novel.id, novel.targetLanguage) { mutableStateOf(novel.targetLanguage.orEmpty()) }
+    var source by remember(novel.id, novel.language) { mutableStateOf(novel.language.orEmpty()) }
+    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("AI processing", style = MaterialTheme.typography.titleSmall)
+        Text(
+            "Processes chapters ahead of where you read: Fix corrects grammar, Translate translates (and fixes) into the target language.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AutoProcessMode.entries.forEach { mode ->
+                FilterChip(
+                    selected = novel.autoProcess == mode,
+                    onClick = { onSave(mode, target, novel.translateWithSonnet, source) },
+                    label = { Text(mode.name.lowercase().replaceFirstChar { it.uppercase() }) },
+                )
+            }
+        }
+        OutlinedTextField(
+            value = target, onValueChange = { target = it }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+            label = { Text("Target language (default: $defaultTarget)") },
+        )
+        OutlinedTextField(
+            value = source, onValueChange = { source = it }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+            label = { Text("Source language (optional, e.g. Chinese)") },
+        )
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Switch(checked = novel.translateWithSonnet, onCheckedChange = { onSave(novel.autoProcess, target, it, source) })
+            Text("Translate with Sonnet (better quality, costs more)", style = MaterialTheme.typography.bodyMedium)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedButton(onClick = { onSave(novel.autoProcess, target, novel.translateWithSonnet, source) }) { Text("Save languages") }
+            OutlinedButton(onClick = onOpenGlossary) { Text("Glossary") }
+        }
+    }
 }

@@ -12,7 +12,14 @@ import com.readerapp.data.settings.ReaderPrefsRepository
 import com.readerapp.scrape.PrefetchScheduler
 import com.readerapp.ui.nav.NovelRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
+import com.readerapp.ai.process.ProcessScheduler
+import com.readerapp.data.db.AutoProcessMode
+import com.readerapp.data.settings.AiSettings
+import com.readerapp.scrape.toc.TocImporter
+import com.readerapp.scrape.toc.TocResult
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -25,6 +32,9 @@ class NovelDetailViewModel @Inject constructor(
     private val chapterRepo: ChapterRepository,
     private val prefs: ReaderPrefsRepository,
     private val prefetch: PrefetchScheduler,
+    private val toc: TocImporter,
+    private val aiSettings: AiSettings,
+    private val processScheduler: ProcessScheduler,
 ) : ViewModel() {
     private val novelId = savedStateHandle.toRoute<NovelRoute>().novelId
 
@@ -33,6 +43,51 @@ class NovelDetailViewModel @Inject constructor(
 
     val chapters: StateFlow<List<Chapter>> = chapterRepo.observeChapters(novelId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    private val _refreshing = MutableStateFlow(false)
+    val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
+
+    private val _message = MutableStateFlow<String?>(null)
+    val message: StateFlow<String?> = _message.asStateFlow()
+
+    /** Default target language from settings (shown as the hint for the per-novel override). */
+    val defaultTargetLanguage: StateFlow<String> = aiSettings.targetLanguage
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AiSettings.DEFAULT_TARGET_LANGUAGE)
+
+    fun messageShown() {
+        _message.value = null
+    }
+
+    /** Re-reads the novel's table of contents with the domain's adapter (follows pagination). */
+    fun refreshChapterList() {
+        if (_refreshing.value) return
+        _refreshing.value = true
+        viewModelScope.launch {
+            try {
+                _message.value = when (val r = toc.import(novelId)) {
+                    is TocResult.Imported -> "Chapter list updated: ${r.total} chapters (${r.added} new)."
+                    TocResult.NoAdapter -> "No site adapter for this domain yet. It is created in the background after the first import."
+                    TocResult.NoTocSpec -> "This site's adapter has no table-of-contents selectors."
+                    TocResult.NoNovelPage -> "The novel's main page is unknown. Re-add it from its page in the browser."
+                    is TocResult.FetchFailed -> "Could not read the chapter list: ${r.reason}"
+                }
+            } finally {
+                _refreshing.value = false
+            }
+        }
+    }
+
+    fun saveAiSettings(mode: AutoProcessMode, targetLanguage: String, sonnet: Boolean, sourceLanguage: String) {
+        viewModelScope.launch {
+            novels.setAiSettings(novelId, mode, targetLanguage, sonnet, sourceLanguage)
+            // Start the queue right away from the reading position.
+            if (mode != AutoProcessMode.OFF) {
+                val n = novels.get(novelId)
+                val anchor = n?.lastReadChapterId ?: chapters.value.firstOrNull()?.id
+                if (anchor != null) processScheduler.schedule(novelId, anchor)
+            }
+        }
+    }
 
     /** The chapter "continue reading" should open: last read, else first unread, else first. */
     fun continueTarget(onResult: (Long?) -> Unit) {

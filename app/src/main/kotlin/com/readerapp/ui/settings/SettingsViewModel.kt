@@ -30,6 +30,20 @@ class SettingsViewModel @Inject constructor(
     val monthToDateUsd: StateFlow<Double> = usage.observeMonthToDateUsd()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0.0)
 
+    val targetLanguage: StateFlow<String> = aiSettings.targetLanguage
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AiSettings.DEFAULT_TARGET_LANGUAGE)
+
+    val processAhead: StateFlow<Int> = aiSettings.processAhead
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AiSettings.DEFAULT_PROCESS_AHEAD)
+
+    fun setTargetLanguage(language: String) {
+        viewModelScope.launch { aiSettings.setTargetLanguage(language) }
+    }
+
+    fun setProcessAhead(n: Int) {
+        viewModelScope.launch { aiSettings.setProcessAhead(n) }
+    }
+
     fun setMonthlyCap(usd: Double) {
         viewModelScope.launch { aiSettings.setMonthlyCapUsd(usd) }
     }

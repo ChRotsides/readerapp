@@ -12,14 +12,15 @@ import androidx.room.TypeConverters
         ChapterText::class,
         GlossaryEntry::class,
         ChapterSummary::class,
+        ArcSummary::class,
         SiteAdapter::class,
         AdapterFixture::class,
         DomainState::class,
         AiUsage::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
-    autoMigrations = [AutoMigration(from = 1, to = 2)],
+    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3)],
 )
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
@@ -28,6 +29,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun chapterTextDao(): ChapterTextDao
     abstract fun glossaryDao(): GlossaryDao
     abstract fun chapterSummaryDao(): ChapterSummaryDao
+    abstract fun arcSummaryDao(): ArcSummaryDao
     abstract fun adapterDao(): AdapterDao
     abstract fun domainStateDao(): DomainStateDao
     abstract fun aiUsageDao(): AiUsageDao

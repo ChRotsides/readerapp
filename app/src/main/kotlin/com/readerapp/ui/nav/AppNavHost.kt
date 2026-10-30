@@ -6,6 +6,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.readerapp.ui.browser.BrowserScreen
 import com.readerapp.ui.detail.NovelDetailScreen
+import com.readerapp.ui.glossary.GlossaryScreen
 import com.readerapp.ui.library.LibraryScreen
 import com.readerapp.ui.reader.ReaderScreen
 import com.readerapp.ui.adapters.AdaptersScreen
@@ -16,6 +17,7 @@ import kotlinx.serialization.Serializable
 @Serializable data class BrowserRoute(val url: String? = null)
 @Serializable data class NovelRoute(val novelId: Long)
 @Serializable data class ReaderRoute(val chapterId: Long)
+@Serializable data class GlossaryRoute(val novelId: Long)
 @Serializable object SettingsRoute
 @Serializable object AdaptersRoute
 
@@ -44,12 +46,15 @@ fun AppNavHost() {
                 onBack = { nav.popBackStack() },
                 onOpenChapter = { nav.navigate(ReaderRoute(it)) },
                 onOpenInBrowser = { nav.navigate(BrowserRoute(it)) },
+                onOpenGlossary = { nav.navigate(GlossaryRoute(it)) },
             )
         }
+        composable<GlossaryRoute> { GlossaryScreen(onBack = { nav.popBackStack() }) }
         composable<ReaderRoute> {
             ReaderScreen(
                 onBack = { nav.popBackStack() },
                 onOpenInBrowser = { nav.navigate(BrowserRoute(it)) },
+                onOpenSettings = { nav.navigate(SettingsRoute) },
             )
         }
         composable<SettingsRoute> {

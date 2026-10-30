@@ -19,6 +19,8 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.readerapp.data.repo.ChapterRepository
+import com.readerapp.data.repo.NovelRepository
+import com.readerapp.scrape.toc.TocScheduler
 import com.readerapp.scrape.FetchedPage
 import com.readerapp.scrape.HttpFetcher
 import com.readerapp.scrape.WebViewFetcher
@@ -141,6 +143,8 @@ class AdapterWorker @AssistedInject constructor(
     @Assisted context: Context,
     @Assisted params: WorkerParameters,
     private val orchestrator: RepairOrchestrator,
+    private val novels: NovelRepository,
+    private val toc: TocScheduler,
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
@@ -152,6 +156,10 @@ class AdapterWorker @AssistedInject constructor(
             }
             MODE_REGENERATE -> orchestrator.regenerate(domain)
             else -> orchestrator.repair(domain)
+        }
+        // A usable adapter may now know how to read table-of-contents pages: import them for this domain's novels.
+        if (outcome is RepairOutcome.Fixed || outcome is RepairOutcome.Reactivated || outcome is RepairOutcome.NotNeeded) {
+            runCatching { novels.withoutToc(domain).forEach { toc.schedule(it.id) } }
         }
         return if (outcome is RepairOutcome.Transient && runAttemptCount < MAX_RETRIES) Result.retry() else Result.success()
     }

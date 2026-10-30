@@ -39,6 +39,7 @@ object JsonAdapterRunner {
                 paragraphs = paragraphs,
                 nextUrl = spec.chapter.next?.let { linkOf(doc, it) },
                 prevUrl = spec.chapter.prev?.let { linkOf(doc, it) },
+                novelUrl = spec.chapter.novelLink?.let { linkOf(doc, it) },
             ),
             novelInfo = spec.novel?.let { novelInfo(doc, it) },
             extractor = extractorName,

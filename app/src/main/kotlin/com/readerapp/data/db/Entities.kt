@@ -10,6 +10,9 @@ enum class ChapterStatus { NOT_FETCHED, FETCHED, LOCKED, FAILED }
 
 enum class TextVariant { ORIGINAL, FIXED, TRANSLATED }
 
+/** What the background queue does to chapters ahead of the reader. */
+enum class AutoProcessMode { OFF, FIX, TRANSLATE }
+
 enum class AdapterKind { JSON, JS }
 
 enum class AdapterStatus { ACTIVE, BROKEN, RETIRED }
@@ -30,6 +33,15 @@ data class Novel(
     val scrollPos: Int = 0,
     val addedAt: Long = System.currentTimeMillis(),
     val lastOpenedAt: Long = addedAt,
+    /** The novel's main page (table of contents / info page), when known. */
+    val novelUrl: String? = null,
+    /** When the table of contents was last imported; null = never. */
+    val tocFetchedAt: Long? = null,
+    @ColumnInfo(defaultValue = "'OFF'") val autoProcess: AutoProcessMode = AutoProcessMode.OFF,
+    /** Translation target for this novel; null = the global default from settings. */
+    val targetLanguage: String? = null,
+    /** Translate with Sonnet (quality) instead of Haiku. */
+    @ColumnInfo(defaultValue = "0") val translateWithSonnet: Boolean = false,
 )
 
 @Entity(
@@ -99,6 +111,8 @@ data class GlossaryEntry(
     val source: String,
     val target: String,
     val note: String? = null,
+    /** Added or edited by the user: automatic glossary merging never overwrites these. */
+    @ColumnInfo(defaultValue = "0") val userEdited: Boolean = false,
 )
 
 @Entity(
@@ -114,6 +128,32 @@ data class GlossaryEntry(
 )
 data class ChapterSummary(
     @PrimaryKey val chapterId: Long,
+    val summary: String,
+    val model: String? = null,
+    val createdAt: Long = System.currentTimeMillis(),
+)
+
+/**
+ * Compression of the 50 chapter summaries of chapter indices [arcIndex]*50 .. arcIndex*50+49 (floor division, so
+ * the grouping does not depend on how many chapters have been discovered).
+ */
+@Entity(
+    tableName = "arc_summaries",
+    primaryKeys = ["novelId", "arcIndex"],
+    foreignKeys = [
+        ForeignKey(
+            entity = Novel::class,
+            parentColumns = ["id"],
+            childColumns = ["novelId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+)
+data class ArcSummary(
+    val novelId: Long,
+    val arcIndex: Int,
+    val startIndex: Int,
+    val endIndex: Int,
     val summary: String,
     val model: String? = null,
     val createdAt: Long = System.currentTimeMillis(),

@@ -1,6 +1,6 @@
 package com.readerapp.di
 
-import com.readerapp.ai.ClaudeClient
+import com.readerapp.ai.GuardedLlmClient
 import com.readerapp.ai.LlmClient
 import com.readerapp.ai.SpendGuard
 import com.readerapp.ai.UsageRepository
@@ -26,10 +26,11 @@ import dagger.hilt.components.SingletonComponent
 abstract class HealModule {
     @Binds abstract fun adapterStore(impl: AdapterRepository): AdapterStore
     @Binds abstract fun adapterRuntime(impl: DefaultAdapterRuntime): AdapterRuntime
-    @Binds abstract fun llmClient(impl: ClaudeClient): LlmClient
+    @Binds abstract fun llmClient(impl: GuardedLlmClient): LlmClient
     @Binds abstract fun spendGuard(impl: UsageRepository): SpendGuard
     @Binds abstract fun verifier(impl: VerifierProvider): ExtractionVerifier
     @Binds abstract fun pageSource(impl: DefaultPageSource): PageSource
     @Binds abstract fun notifier(impl: AndroidAdapterNotifier): AdapterNotifier
+    @Binds abstract fun tocStore(impl: com.readerapp.scrape.toc.RoomTocStore): com.readerapp.scrape.toc.TocStore
     @Binds abstract fun scheduler(impl: WorkRepairScheduler): RepairScheduler
 }

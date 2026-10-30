@@ -1,5 +1,8 @@
 package com.readerapp.ai
 
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+
 object ClaudeModels {
     const val SONNET = "claude-sonnet-5-5"
     const val HAIKU = "claude-haiku-5-5"
@@ -19,6 +22,17 @@ data class LlmRequest(
     val jsonSchema: String? = null,
     val maxTokens: Long = 8_000,
     val purpose: String,
+    /** Put a `cache_control` breakpoint on the system block (use for large, stable system prompts). */
+    val cacheSystem: Boolean = false,
+    /**
+     * Stable text placed first in the first user message and marked with a `cache_control` breakpoint, so follow-up
+     * turns (same [system], same [context], same earlier [history]) hit the prompt cache.
+     */
+    val context: String? = null,
+    /** Earlier (user text, assistant text) turns of a conversation, oldest first; [user] is the newest user text. */
+    val history: List<Pair<String, String>> = emptyList(),
+    /** Ask the API to re-run the request on the default fallback model if the model refuses (Sonnet requests). */
+    val serverFallback: Boolean = model == ClaudeModels.SONNET,
 )
 
 data class LlmResponse(val text: String, val inputTokens: Long, val outputTokens: Long)
@@ -35,4 +49,10 @@ sealed class LlmException(message: String, cause: Throwable? = null) : Exception
 
 fun interface LlmClient {
     suspend fun complete(request: LlmRequest): LlmResponse
+
+    /**
+     * Streams the reply text as it is generated. The default implementation is not incremental (one chunk);
+     * [ClaudeClient] overrides it with real streaming. Failures are thrown from the flow as [LlmException].
+     */
+    fun stream(request: LlmRequest): Flow<String> = flow { emit(complete(request).text) }
 }

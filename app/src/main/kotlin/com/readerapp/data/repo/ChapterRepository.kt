@@ -43,6 +43,31 @@ class ChapterRepository @Inject constructor(
 
     suspend fun saveText(text: ChapterText) = texts.upsert(text)
 
+    /** Emits whenever a variant of the chapter text is added, replaced or removed. */
+    fun observeTexts(chapterId: Long): Flow<List<ChapterText>> = texts.observeAll(chapterId)
+
+    suspend fun allTexts(chapterId: Long): List<ChapterText> = texts.all(chapterId)
+
+    suspend fun nextN(chapter: Chapter, limit: Int): List<Chapter> =
+        chapters.nextN(chapter.novelId, chapter.index, chapter.id, limit)
+
+    suspend fun inRange(novelId: Long, from: Int, to: Int): List<Chapter> = chapters.inRange(novelId, from, to)
+
+    suspend fun fetchedBefore(novelId: Long, index: Int, limit: Int): List<Chapter> =
+        chapters.fetchedBefore(novelId, index, limit)
+
+    /**
+     * Applies a table of contents: chapters whose URL is already known get the TOC position as index (and a title if
+     * they have none); unknown ones are inserted. Reading state, text and status are never touched.
+     */
+    suspend fun applyToc(novelId: Long, refs: List<com.readerapp.scrape.ChapterRef>): com.readerapp.scrape.toc.TocPlan =
+        db.withTransaction {
+            val plan = com.readerapp.scrape.toc.TocPlan.compute(chapters.all(novelId), refs)
+            plan.updates.forEach { chapters.setIndexAndTitle(it.chapterId, it.index, it.title) }
+            plan.inserts.forEach { chapters.insert(Chapter(novelId = novelId, index = it.index, title = it.title, url = it.url)) }
+            plan
+        }
+
     suspend fun setStatus(chapterId: Long, status: ChapterStatus) = chapters.setStatus(chapterId, status)
 
     suspend fun updateScroll(chapterId: Long, index: Int, offset: Int) = chapters.setScroll(chapterId, index, offset)

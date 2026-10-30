@@ -16,6 +16,14 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.TextFormat
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.TextButton
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.foundation.layout.size
+import com.readerapp.data.db.AutoProcessMode
+import com.readerapp.data.db.TextVariant
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -57,16 +65,33 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 fun ReaderScreen(
     onBack: () -> Unit,
     onOpenInBrowser: (String) -> Unit,
+    onOpenSettings: () -> Unit,
     viewModel: ReaderViewModel = hiltViewModel(),
+    qaViewModel: QaViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val prefs by viewModel.prefs.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
+    val notice by viewModel.notice.collectAsStateWithLifecycle()
+    val processing by viewModel.processing.collectAsStateWithLifecycle()
+    val qa by qaViewModel.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     var showPrefs by remember { mutableStateOf(false) }
 
     LaunchedEffect(message) {
         message?.let { snackbar.showSnackbar(it); viewModel.messageShown() }
+    }
+
+    LaunchedEffect(notice) {
+        notice?.let { n ->
+            val result = snackbar.showSnackbar(
+                n.text,
+                actionLabel = if (n.openSettings) "Settings" else null,
+                duration = SnackbarDuration.Long,
+            )
+            if (result == SnackbarResult.ActionPerformed && n.openSettings) onOpenSettings()
+            viewModel.noticeShown()
+        }
     }
 
     val current: Chapter? = when (val s = state) {
@@ -117,16 +142,35 @@ fun ReaderScreen(
                         s.chapter?.let { c -> OutlinedButton(onClick = { onOpenInBrowser(c.url) }) { Text("Open in browser") } }
                     }
                 }
-                is ReaderUiState.Content -> ChapterContent(
-                    content = s,
-                    prefs = prefs,
-                    onPrevious = viewModel::goPrevious,
-                    onNext = viewModel::goNext,
-                    onScroll = { index, offset -> viewModel.saveScroll(s.chapter, index, offset) },
-                    onFinished = { viewModel.markRead(s.chapter.id) },
-                )
+                is ReaderUiState.Content -> Column(Modifier.fillMaxSize()) {
+                    VariantBar(
+                        content = s,
+                        busyVariants = processing.filter { it.first == s.chapter.id }.map { it.second }.toSet(),
+                        onSelect = viewModel::selectVariant,
+                        onProcess = { v -> viewModel.processNow(v) },
+                        onRerun = { v -> viewModel.processNow(v, force = true) },
+                    )
+                    Box(Modifier.weight(1f)) {
+                        ChapterContent(
+                            content = s,
+                            prefs = prefs,
+                            onPrevious = viewModel::goPrevious,
+                            onNext = viewModel::goNext,
+                            onScroll = { index, offset -> viewModel.saveScroll(s.chapter, index, offset) },
+                            onFinished = { viewModel.markRead(s.chapter.id) },
+                            onAskAi = { selected -> qaViewModel.open(selected, s.chapter.id, s.variant, s.paragraphs) },
+                        )
+                    }
+                }
             }
         }
+    }
+
+    if (qa.open) {
+        QaSheet(state = qa, onAsk = qaViewModel::ask, onDismiss = qaViewModel::dismiss, onOpenSettings = {
+            qaViewModel.dismiss()
+            onOpenSettings()
+        })
     }
 
     if (showPrefs) {
@@ -150,6 +194,7 @@ private fun ChapterContent(
     onNext: () -> Unit,
     onScroll: (index: Int, offset: Int) -> Unit,
     onFinished: () -> Unit,
+    onAskAi: (String) -> Unit,
 ) {
     // A fresh list state per chapter restores that chapter's saved position.
     androidx.compose.runtime.key(content.chapter.id) {
@@ -175,7 +220,7 @@ private fun ChapterContent(
 
         val fontSize = prefs.fontSizeSp.sp
         val lineHeight = (prefs.fontSizeSp * prefs.lineSpacing).sp
-        SelectionContainer {
+        ProvideAskAiToolbar(onAsk = onAskAi) { SelectionContainer {
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
@@ -210,6 +255,56 @@ private fun ChapterContent(
                         }
                     }
                 }
+            }
+        } }
+    }
+}
+
+private fun variantLabel(v: TextVariant) = when (v) {
+    TextVariant.ORIGINAL -> "Original"
+    TextVariant.FIXED -> "Fixed"
+    TextVariant.TRANSLATED -> "Translated"
+}
+
+/**
+ * Original / Fixed / Translated switch. Only variants that exist or can be produced are shown; picking one that does
+ * not exist yet produces it. Shows a "processing" state and re-run / process-now buttons for the chapter on screen.
+ */
+@Composable
+private fun VariantBar(
+    content: ReaderUiState.Content,
+    busyVariants: Set<TextVariant>,
+    onSelect: (TextVariant) -> Unit,
+    onProcess: (TextVariant) -> Unit,
+    onRerun: (TextVariant) -> Unit,
+) {
+    val offered = buildList {
+        add(TextVariant.ORIGINAL)
+        add(TextVariant.FIXED) // can always be produced from the original text
+        if (TextVariant.TRANSLATED in content.available || content.canTranslate) add(TextVariant.TRANSLATED)
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        offered.forEach { v ->
+            val exists = v in content.available
+            FilterChip(
+                selected = content.variant == v,
+                onClick = { onSelect(v) },
+                label = { Text(variantLabel(v) + if (!exists && v !in busyVariants) " +" else "") },
+            )
+        }
+        if (busyVariants.isNotEmpty()) {
+            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+            Text("Processing...", style = MaterialTheme.typography.labelMedium)
+        } else if (content.variant != TextVariant.ORIGINAL) {
+            IconButton(onClick = { onRerun(content.variant) }) { Icon(Icons.Filled.Refresh, "Re-run ${variantLabel(content.variant)}") }
+        } else if (content.autoProcess != AutoProcessMode.OFF) {
+            val preferred = if (content.autoProcess == AutoProcessMode.TRANSLATE) TextVariant.TRANSLATED else TextVariant.FIXED
+            if (preferred !in content.available && (preferred != TextVariant.TRANSLATED || content.canTranslate)) {
+                TextButton(onClick = { onProcess(preferred) }) { Text("Process now") }
             }
         }
     }

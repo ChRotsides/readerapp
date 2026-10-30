@@ -151,10 +151,11 @@ class AdapterWriter @Inject constructor(private val llm: LlmClient) {
                 "paragraphs": "CSS selector of paragraph elements inside content, or null to split content by its blocks",
                 "remove": ["selectors of elements inside content to delete, e.g. ads, share bars"],
                 "next": "CSS selector of the next-chapter link (an a element, or a container of one), or null",
-                "prev": "CSS selector of the previous-chapter link, or null"
+                "prev": "CSS selector of the previous-chapter link, or null",
+                "novelLink": "CSS selector of the link on the chapter page that leads to the novel's main page (breadcrumb or 'table of contents' link), or null"
               },
               "novel": {"title": null, "author": null, "cover": null, "synopsis": null},   // optional, selectors
-              "toc": {"items": "selector of chapter links on a table-of-contents page", "nextPage": "selector or null"},   // optional
+              "toc": {"items": "selector of chapter links on the novel's main page, in reading order", "nextPage": "selector of the link to the next page of the chapter list, or null"},   // optional; write it whenever a <novel_page> is given
               "cleanup": {"dropLines": ["regexes; paragraphs containing a match are dropped, e.g. site watermarks"]}
             }
             Selectors use Jsoup CSS syntax. Regexes use Java syntax and must be simple (no nested quantifiers).
