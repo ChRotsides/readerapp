@@ -83,7 +83,9 @@ class NovelImporter @Inject constructor(
 
         val domain = DomainRateLimiter.domainOf(page.url)
         val info = draft.extraction.novelInfo
+        // Also finds a novel created from its novel page (search "Add to library") whose title differs slightly.
         val existingNovel = novels.findByDomainAndTitle(domain, title)
+            ?: novelUrl?.let { novels.findByDomainAndUrl(domain, it) }
         val novelId = existingNovel?.id ?: novels.create(
             Novel(
                 title = title,

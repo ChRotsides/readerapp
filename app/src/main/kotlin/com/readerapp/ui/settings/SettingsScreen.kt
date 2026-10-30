@@ -81,6 +81,26 @@ fun SettingsScreen(onBack: () -> Unit, onOpenAdapters: () -> Unit, viewModel: Se
             settingsError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
 
             HorizontalDivider()
+            Text("Discovery server", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Your own server, reached over Tailscale (https://<pc>.<tailnet>.ts.net or http://100.x.y.z:8000). " +
+                    "Used by Discover. The token is stored encrypted.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            SecretField("Server URL", secrets.serverUrl, masked = false,
+                onSave = { viewModel.saveSecret(SecretKeyName.SERVER_URL, it) },
+                onClear = { viewModel.clearSecret(SecretKeyName.SERVER_URL) })
+            secrets.serverUrl?.let { Text("Current: $it", style = MaterialTheme.typography.bodySmall) }
+            SecretField("Server API token", secrets.serverToken, masked = true,
+                onSave = { viewModel.saveSecret(SecretKeyName.SERVER_TOKEN, it) },
+                onClear = { viewModel.clearSecret(SecretKeyName.SERVER_TOKEN) })
+            val connection by viewModel.connection.collectAsStateWithLifecycle()
+            OutlinedButton(onClick = viewModel::testConnection, enabled = secrets.serverUrl != null && secrets.serverToken != null) {
+                Text("Test connection")
+            }
+            connection?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+
+            HorizontalDivider()
             Text("AI spending", style = MaterialTheme.typography.titleMedium)
             Text(
                 "Spent this month: ${"$%.4f".format(spent)} of ${"$%.2f".format(cap)}. " +

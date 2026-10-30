@@ -10,6 +10,7 @@ import com.readerapp.data.settings.SecretKeyName
 import com.readerapp.data.settings.SecureSettings
 import com.readerapp.data.settings.Secrets
 import com.readerapp.data.settings.ThemeMode
+import com.readerapp.search.describe
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -26,6 +27,7 @@ class SettingsViewModel @Inject constructor(
     private val aiSettings: AiSettings,
     usage: UsageRepository,
     private val resume: com.readerapp.ai.resume.SpendResumeScheduler,
+    private val discovery: com.readerapp.search.DiscoveryApi,
 ) : ViewModel() {
     val monthlyCapUsd: StateFlow<Double> = aiSettings.monthlyCapUsd
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AiSettings.DEFAULT_CAP_USD)
@@ -69,6 +71,17 @@ class SettingsViewModel @Inject constructor(
     fun saveSecret(name: SecretKeyName, value: String) {
         viewModelScope.launch {
             _error.value = if (secure.set(name, value)) null else "That is not a valid http(s) URL, so it was not saved."
+        }
+    }
+
+    private val _connection = MutableStateFlow<String?>(null)
+    /** Text result of the last "Test connection"; "Testing..." while it runs. */
+    val connection: StateFlow<String?> = _connection.asStateFlow()
+
+    fun testConnection() {
+        _connection.value = "Testing..."
+        viewModelScope.launch {
+            _connection.value = discovery.testConnection().describe()
         }
     }
 

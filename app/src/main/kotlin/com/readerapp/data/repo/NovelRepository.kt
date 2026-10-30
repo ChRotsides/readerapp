@@ -19,6 +19,10 @@ class NovelRepository @Inject constructor(private val dao: NovelDao) {
     suspend fun findByDomainAndTitle(domain: String, title: String): Novel? =
         dao.findByDomainAndTitle(domain, title)
 
+    suspend fun findByDomainAndUrl(domain: String, url: String): Novel? = dao.findByDomainAndUrl(domain, url)
+
+    fun observeAll(): Flow<List<Novel>> = dao.observeAll()
+
     suspend fun create(novel: Novel): Long = dao.insert(novel)
 
     suspend fun update(novel: Novel) = dao.update(novel)

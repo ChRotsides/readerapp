@@ -15,6 +15,8 @@ enum class SecretKeyName(val prefKey: String) {
     ANTHROPIC_API_KEY("secret_anthropic_api_key"),
     JEV_API_KEY("secret_jev_api_key"),
     JEV_BASE_URL("secret_jev_base_url"),
+    SERVER_URL("secret_server_url"),
+    SERVER_TOKEN("secret_server_token"),
 }
 
 /** Decrypted view of the stored secrets. Never log or persist this. */
@@ -22,11 +24,15 @@ data class Secrets(
     val anthropicApiKey: String? = null,
     val jevApiKey: String? = null,
     val jevBaseUrl: String? = null,
+    val serverUrl: String? = null,
+    val serverToken: String? = null,
 ) {
     fun valueOf(name: SecretKeyName): String? = when (name) {
         SecretKeyName.ANTHROPIC_API_KEY -> anthropicApiKey
         SecretKeyName.JEV_API_KEY -> jevApiKey
         SecretKeyName.JEV_BASE_URL -> jevBaseUrl
+        SecretKeyName.SERVER_URL -> serverUrl
+        SecretKeyName.SERVER_TOKEN -> serverToken
     }
 }
 
@@ -42,6 +48,8 @@ class SecureSettings @Inject constructor(
             anthropicApiKey = read(SecretKeyName.ANTHROPIC_API_KEY),
             jevApiKey = read(SecretKeyName.JEV_API_KEY),
             jevBaseUrl = read(SecretKeyName.JEV_BASE_URL),
+            serverUrl = read(SecretKeyName.SERVER_URL),
+            serverToken = read(SecretKeyName.SERVER_TOKEN),
         )
     }
 
@@ -57,6 +65,7 @@ class SecureSettings @Inject constructor(
         var trimmed = value.trim()
         if (trimmed.isEmpty()) { clear(name); return true }
         if (name == SecretKeyName.JEV_BASE_URL) trimmed = normalizeBaseUrl(trimmed) ?: return false
+        if (name == SecretKeyName.SERVER_URL) trimmed = normalizeServerUrl(trimmed) ?: return false
         val encrypted = cipher.encrypt(trimmed)
         store.edit { it[stringPreferencesKey(name.prefKey)] = encrypted }
         return true
@@ -74,6 +83,23 @@ fun normalizeBaseUrl(text: String): String? {
     val withScheme = if (Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://").containsMatchIn(t)) t else "https://$t"
     val url = withScheme.toHttpUrlOrNull() ?: return null
     return if (url.scheme == "http" || url.scheme == "https") withScheme else null
+}
+
+/**
+ * The discovery server's base URL: http(s) with a host, no path/query/trailing slash. Without a scheme, `*.ts.net`
+ * names get https (Tailscale serve) and everything else (e.g. `100.64.0.1:8000`) plain http.
+ */
+fun normalizeServerUrl(text: String): String? {
+    val t = text.trim()
+    if (t.isEmpty()) return null
+    val hasScheme = Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://").containsMatchIn(t)
+    val withScheme = if (hasScheme) t else {
+        val host = t.substringBefore('/').substringBefore(':').lowercase()
+        (if (host.endsWith(".ts.net")) "https://" else "http://") + t
+    }
+    val url = withScheme.toHttpUrlOrNull() ?: return null
+    if (url.scheme != "http" && url.scheme != "https") return null
+    return url.newBuilder().encodedPath("/").query(null).fragment(null).build().toString().trimEnd('/')
 }
 
 /** "••••abcd" style display for a stored secret. */

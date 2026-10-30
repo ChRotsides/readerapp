@@ -37,6 +37,12 @@ interface NovelDao {
     @Query("SELECT * FROM novels WHERE domain = :domain AND title = :title LIMIT 1")
     suspend fun findByDomainAndTitle(domain: String, title: String): Novel?
 
+    @Query("SELECT * FROM novels WHERE domain = :domain AND (novelUrl = :url OR sourceUrl = :url) LIMIT 1")
+    suspend fun findByDomainAndUrl(domain: String, url: String): Novel?
+
+    @Query("SELECT * FROM novels")
+    fun observeAll(): Flow<List<Novel>>
+
     @Insert
     suspend fun insert(novel: Novel): Long
 

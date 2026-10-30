@@ -6,6 +6,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.readerapp.ui.browser.BrowserScreen
 import com.readerapp.ui.detail.NovelDetailScreen
+import com.readerapp.ui.discover.DiscoverScreen
+import com.readerapp.ui.discover.WorkScreen
 import com.readerapp.ui.glossary.GlossaryScreen
 import com.readerapp.ui.library.LibraryScreen
 import com.readerapp.ui.reader.ReaderScreen
@@ -20,6 +22,8 @@ import kotlinx.serialization.Serializable
 @Serializable data class GlossaryRoute(val novelId: Long)
 @Serializable object SettingsRoute
 @Serializable object AdaptersRoute
+@Serializable object DiscoverRoute
+@Serializable data class WorkRoute(val workId: String)
 
 @Composable
 fun AppNavHost() {
@@ -30,6 +34,22 @@ fun AppNavHost() {
                 onOpenNovel = { nav.navigate(NovelRoute(it)) },
                 onOpenBrowser = { nav.navigate(BrowserRoute()) },
                 onOpenSettings = { nav.navigate(SettingsRoute) },
+                onOpenDiscover = { nav.navigate(DiscoverRoute) },
+            )
+        }
+        composable<DiscoverRoute> {
+            DiscoverScreen(
+                onBack = { nav.popBackStack() },
+                onOpenWork = { nav.navigate(WorkRoute(it)) },
+                onOpenNovel = { nav.navigate(NovelRoute(it)) },
+                onOpenSettings = { nav.navigate(SettingsRoute) },
+            )
+        }
+        composable<WorkRoute> {
+            WorkScreen(
+                onBack = { nav.popBackStack() },
+                onOpenInBrowser = { nav.navigate(BrowserRoute(it)) },
+                onOpenNovel = { nav.navigate(NovelRoute(it)) },
             )
         }
         composable<BrowserRoute> {

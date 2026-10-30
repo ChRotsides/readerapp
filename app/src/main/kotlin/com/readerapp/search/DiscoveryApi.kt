@@ -1,0 +1,176 @@
+package com.readerapp.search
+
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.intOrNull
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import java.io.IOException
+import java.io.InterruptedIOException
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+/** The discovery server, behind an interface so the screens can be tested with a fake. */
+interface DiscoveryApi {
+    suspend fun search(request: SearchRequest): SearchResponse
+    suspend fun work(workId: String): Work
+    suspend fun searchTitle(query: String, limit: Int = 20): List<Work>
+    suspend fun testConnection(): ConnectionResult
+}
+
+data class ServerConfig(val baseUrl: String, val token: String)
+
+fun interface ServerConfigProvider {
+    suspend fun config(): ServerConfig?
+}
+
+class ServerApi(
+    private val configProvider: ServerConfigProvider,
+    private val client: OkHttpClient = defaultClient(),
+) : DiscoveryApi {
+
+    override suspend fun search(request: SearchRequest): SearchResponse {
+        val body = json.encodeToString(SearchRequest.serializer(), request).toRequestBody(JSON_MEDIA)
+        return call("search", { post(body) }, "search") { json.decodeFromString(SearchResponse.serializer(), it) }
+    }
+
+    override suspend fun work(workId: String): Work =
+        call("works/${workId.trim()}", { get() }, null) { json.decodeFromString(Work.serializer(), it) }
+
+    override suspend fun searchTitle(query: String, limit: Int): List<Work> =
+        call("works", { get() }, null, { addQueryParameter("query", query.trim()); addQueryParameter("limit", limit.toString()) }) {
+            json.decodeFromString(ListSerializer(Work.serializer()), it)
+        }
+
+    override suspend fun testConnection(): ConnectionResult {
+        val cfg = configProvider.config() ?: return ConnectionResult.NotConfigured
+        val base = cfg.baseUrl.toHttpUrlOrNull() ?: return ConnectionResult.Other("The server URL is not valid.")
+        val quick = client.newBuilder().callTimeout(15, TimeUnit.SECONDS).readTimeout(12, TimeUnit.SECONDS).build()
+        try {
+            val health = quick.newCall(Request.Builder().url(base.newBuilder().addPathSegment("health").build()).get().build()).await()
+            health.use { if (!it.isSuccessful) return ConnectionResult.Other("Server answered /health with ${it.code}.") }
+        } catch (e: IOException) {
+            return ConnectionResult.Unreachable
+        }
+        return try {
+            val resp = quick.newCall(authed(base, "admin/crawl", cfg.token) { get() }).await()
+            resp.use {
+                val text = it.body.string()
+                when {
+                    it.code == 401 -> ConnectionResult.BadToken
+                    it.code == 503 -> ConnectionResult.ServerKeysMissing(detailOf(text))
+                    it.isSuccessful -> {
+                        val obj = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull()
+                        val works = (obj?.get("works") as? JsonPrimitive)?.intOrNull
+                        ConnectionResult.Ok(works, "Connected. Token accepted${works?.let { w -> "; $w works in the catalog" }.orEmpty()}.")
+                    }
+                    else -> ConnectionResult.Other("Server answered ${it.code}${detailOf(text)?.let { d -> ": $d" }.orEmpty()}.")
+                }
+            }
+        } catch (e: IOException) {
+            ConnectionResult.Unreachable
+        }
+    }
+
+    private suspend fun <T> call(
+        path: String,
+        method: Request.Builder.() -> Request.Builder,
+        @Suppress("UNUSED_PARAMETER") tag: String?,
+        query: HttpUrl.Builder.() -> Unit = {},
+        parse: (String) -> T,
+    ): T {
+        val cfg = configProvider.config() ?: throw SearchException.NotConfigured()
+        val base = cfg.baseUrl.toHttpUrlOrNull() ?: throw SearchException.NotConfigured()
+        val request = authed(base, path, cfg.token, query, method)
+        val response = try {
+            client.newCall(request).await()
+        } catch (e: InterruptedIOException) {
+            throw SearchException.Timeout(e)
+        } catch (e: IOException) {
+            throw SearchException.Network(e)
+        }
+        response.use {
+            val text = try {
+                it.body.string()
+            } catch (e: InterruptedIOException) {
+                throw SearchException.Timeout(e)
+            } catch (e: IOException) {
+                throw SearchException.Network(e)
+            }
+            if (!it.isSuccessful) throw errorFor(it.code, detailOf(text))
+            return try {
+                parse(text)
+            } catch (e: Exception) {
+                throw SearchException.BadResponse(e)
+            }
+        }
+    }
+
+    private fun authed(
+        base: HttpUrl,
+        path: String,
+        token: String,
+        query: HttpUrl.Builder.() -> Unit = {},
+        method: Request.Builder.() -> Request.Builder,
+    ): Request {
+        val url = base.newBuilder().apply { path.split('/').filter { it.isNotEmpty() }.forEach { addPathSegment(it) } }
+            .apply(query).build()
+        return Request.Builder().url(url).header("Authorization", "Bearer $token").header("Accept", "application/json")
+            .method().build()
+    }
+
+    companion object {
+        private val JSON_MEDIA = "application/json".toMediaType()
+
+        val json = Json { ignoreUnknownKeys = true; coerceInputValues = true; explicitNulls = false; encodeDefaults = true }
+
+        /** Search runs Claude (HyDE + rerank) on the server and can take 20-40 s. */
+        fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(90, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(120, TimeUnit.SECONDS)
+            .build()
+
+        fun errorFor(code: Int, detail: String?): SearchException = when (code) {
+            401 -> SearchException.Unauthorized()
+            402 -> SearchException.BudgetReached(detail)
+            404 -> SearchException.NotFound()
+            503 -> SearchException.ServerUnavailable(detail)
+            else -> SearchException.Http(code, detail)
+        }
+
+        /** FastAPI's `{"detail": "..."}` (or a validation-error list) as text. */
+        fun detailOf(body: String): String? {
+            val el = runCatching { json.parseToJsonElement(body) }.getOrNull() as? JsonObject ?: return null
+            return when (val d = el["detail"]) {
+                is JsonPrimitive -> d.contentOrNull
+                is JsonArray -> d.joinToString("; ") { (it as? JsonObject)?.get("msg")?.let { m -> (m as? JsonPrimitive)?.contentOrNull }.orEmpty() }
+                    .ifBlank { null }
+                else -> null
+            }
+        }
+    }
+}
+
+private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
+    cont.invokeOnCancellation { runCatching { cancel() } }
+    enqueue(object : Callback {
+        override fun onFailure(call: Call, e: IOException) { if (cont.isActive) cont.resumeWithException(e) }
+        override fun onResponse(call: Call, response: Response) { cont.resume(response) }
+    })
+}

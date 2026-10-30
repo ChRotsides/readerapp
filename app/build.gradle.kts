@@ -101,5 +101,6 @@ dependencies {
     implementation(libs.commons.compress)
 
     testImplementation(libs.junit)
+    testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.kotlinx.coroutines.test)
 }

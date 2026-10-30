@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -55,6 +56,7 @@ fun LibraryScreen(
     onOpenNovel: (Long) -> Unit,
     onOpenBrowser: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenDiscover: () -> Unit,
     viewModel: LibraryViewModel = hiltViewModel(),
 ) {
     val library by viewModel.library.collectAsStateWithLifecycle()
@@ -66,6 +68,7 @@ fun LibraryScreen(
             TopAppBar(
                 title = { Text("Library") },
                 actions = {
+                    IconButton(onClick = onOpenDiscover) { Icon(Icons.Filled.Search, "Discover novels") }
                     IconButton(onClick = onOpenSettings) { Icon(Icons.Filled.Settings, "Settings") }
                 },
             )
