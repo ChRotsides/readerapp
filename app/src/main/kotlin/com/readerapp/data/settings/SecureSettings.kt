@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -48,16 +49,31 @@ class SecureSettings @Inject constructor(
 
     suspend fun anthropicApiKey(): String? = current().anthropicApiKey
 
-    suspend fun set(name: SecretKeyName, value: String) {
-        val trimmed = value.trim()
-        if (trimmed.isEmpty()) return clear(name)
+    /**
+     * Stores [value] encrypted. Returns false (nothing stored) when the value is not acceptable, currently only an
+     * unusable Jev endpoint; a scheme-less endpoint such as `api.example.com` is stored as `https://api.example.com`.
+     */
+    suspend fun set(name: SecretKeyName, value: String): Boolean {
+        var trimmed = value.trim()
+        if (trimmed.isEmpty()) { clear(name); return true }
+        if (name == SecretKeyName.JEV_BASE_URL) trimmed = normalizeBaseUrl(trimmed) ?: return false
         val encrypted = cipher.encrypt(trimmed)
         store.edit { it[stringPreferencesKey(name.prefKey)] = encrypted }
+        return true
     }
 
     suspend fun clear(name: SecretKeyName) {
         store.edit { it.remove(stringPreferencesKey(name.prefKey)) }
     }
+}
+
+/** An http(s) endpoint with a host, or null. Adds `https://` when the user typed no scheme. */
+fun normalizeBaseUrl(text: String): String? {
+    val t = text.trim()
+    if (t.isEmpty()) return null
+    val withScheme = if (Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://").containsMatchIn(t)) t else "https://$t"
+    val url = withScheme.toHttpUrlOrNull() ?: return null
+    return if (url.scheme == "http" || url.scheme == "https") withScheme else null
 }
 
 /** "••••abcd" style display for a stored secret. */

@@ -20,6 +20,7 @@ import com.readerapp.data.settings.ReaderPrefsRepository
 import com.readerapp.scrape.ChapterFetcher
 import com.readerapp.scrape.FetchOutcome
 import com.readerapp.scrape.PrefetchScheduler
+import com.readerapp.scrape.RecheckOutcome
 import com.readerapp.ui.nav.ReaderRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -91,6 +92,11 @@ class ReaderViewModel @Inject constructor(
 
     /** The (chapter, variant) pairs being produced right now. */
     val processing: StateFlow<Set<Pair<Long, TextVariant>>> = _processing.asStateFlow()
+
+    private val _rechecking = MutableStateFlow(false)
+
+    /** A "refetch & recheck" of the flagged chapter on screen is running. */
+    val rechecking: StateFlow<Boolean> = _rechecking.asStateFlow()
 
     private val _notice = MutableStateFlow<AiNotice?>(null)
     val notice: StateFlow<AiNotice?> = _notice.asStateFlow()
@@ -233,12 +239,42 @@ class ReaderViewModel @Inject constructor(
     fun goNext() {
         val content = _state.value as? ReaderUiState.Content ?: return
         viewModelScope.launch {
-            val next = chapters.next(content.chapter)
+            var next = chapters.next(content.chapter)
             if (next == null) {
-                _message.value = "No next chapter link was found on this page."
+                // A chapter cached while it was the newest has no successor; ask the site again.
+                _message.value = "Checking the site for a newer chapter..."
+                next = fetcher.refreshNextLink(content.chapter.id)
+            }
+            if (next == null) {
+                _message.value = "No newer chapter found yet."
             } else {
                 chapters.setRead(content.chapter.id)
                 load(next.id)
+            }
+        }
+    }
+
+    /**
+     * The chapter was stored although the checker was unsure ("possibly incomplete"). Downloads it again and checks it
+     * again; the warning is only cleared when the new copy is confirmed good, otherwise the old text stays as it was.
+     */
+    fun recheck() {
+        val content = _state.value as? ReaderUiState.Content ?: return
+        if (_rechecking.value) return
+        _rechecking.value = true
+        viewModelScope.launch {
+            try {
+                when (val outcome = fetcher.refetchAndRecheck(content.chapter.id)) {
+                    RecheckOutcome.Cleared -> {
+                        _message.value = "Checked again: the chapter looks complete."
+                        load(content.chapter.id)
+                    }
+                    RecheckOutcome.StillUncertain -> _message.value = "Still not sure this chapter is complete."
+                    is RecheckOutcome.NeedsBrowser -> _message.value = outcome.reason
+                    is RecheckOutcome.Failed -> _message.value = "Could not re-check: ${outcome.reason}"
+                }
+            } finally {
+                _rechecking.value = false
             }
         }
     }

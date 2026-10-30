@@ -13,12 +13,18 @@ fun interface SpendGuard {
     suspend fun capReached(): Boolean
 }
 
+/** Month-to-date spend and the cap in micro-USD, for atomic budget reservations. */
+interface BudgetSource {
+    suspend fun spentMicros(): Long
+    suspend fun capMicros(): Long
+}
+
 /** Records per-call token usage and answers month-to-date spend questions. */
 @Singleton
 class UsageRepository @Inject constructor(
     private val dao: AiUsageDao,
     private val settings: AiSettings,
-) : SpendGuard {
+) : SpendGuard, BudgetSource {
     suspend fun record(model: String, purpose: String, inputTokens: Long, outputTokens: Long) {
         dao.insert(
             AiUsage(
@@ -31,6 +37,10 @@ class UsageRepository @Inject constructor(
             ),
         )
     }
+
+    override suspend fun spentMicros(): Long = dao.costSince(ModelPricing.monthStartMillis(System.currentTimeMillis()))
+
+    override suspend fun capMicros(): Long = Math.round(settings.currentCapUsd() * 1_000_000)
 
     suspend fun monthToDateUsd(): Double =
         ModelPricing.microsToUsd(dao.costSince(ModelPricing.monthStartMillis(System.currentTimeMillis())))

@@ -3,7 +3,7 @@ package com.readerapp.scrape.adapter
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.jsoup.Jsoup
-import org.jsoup.select.Selector
+import com.google.re2j.Pattern
 
 /**
  * Declarative site adapter: CSS selectors (Jsoup syntax) plus regex cleanup. Stored as JSON in
@@ -23,6 +23,7 @@ data class JsonAdapterSpec(
         fun selector(name: String, sel: String?) {
             if (sel.isNullOrBlank()) return
             if (sel.length > MAX_SELECTOR_LEN) errors += "$name: selector too long"
+            else if (REGEX_SELECTOR.containsMatchIn(sel)) errors += "$name: regex selectors (:matches*, [attr~=...]) are not allowed"
             else runCatching { probe.select(sel) }.onFailure { errors += "$name: invalid CSS selector '$sel' (${it.message})" }
         }
         if (chapter.content.isBlank()) errors += "chapter.content is required"
@@ -43,7 +44,7 @@ data class JsonAdapterSpec(
         }
         cleanup.dropLines.forEachIndexed { i, r ->
             if (r.length > MAX_REGEX_LEN) errors += "cleanup.dropLines[$i]: pattern too long"
-            else runCatching { Regex(r) }.onFailure { errors += "cleanup.dropLines[$i]: invalid regex (${it.message})" }
+            else runCatching { Pattern.compile(r) }.onFailure { errors += "cleanup.dropLines[$i]: invalid RE2 regex, no lookaround/backreferences (${it.message})" }
         }
         return errors
     }
@@ -53,6 +54,9 @@ data class JsonAdapterSpec(
     companion object {
         const val MAX_SELECTOR_LEN = 300
         const val MAX_REGEX_LEN = 200
+
+        /** Jsoup evaluates these with java.util.regex (backtracking), so LLM-written selectors must not use them. */
+        private val REGEX_SELECTOR = Regex(":\\s*matches|~=", RegexOption.IGNORE_CASE)
 
         val CODEC = Json { ignoreUnknownKeys = true; coerceInputValues = true; encodeDefaults = true; prettyPrint = true }
 

@@ -74,6 +74,7 @@ fun ReaderScreen(
     val message by viewModel.message.collectAsStateWithLifecycle()
     val notice by viewModel.notice.collectAsStateWithLifecycle()
     val processing by viewModel.processing.collectAsStateWithLifecycle()
+    val rechecking by viewModel.rechecking.collectAsStateWithLifecycle()
     val qa by qaViewModel.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     var showPrefs by remember { mutableStateOf(false) }
@@ -143,6 +144,7 @@ fun ReaderScreen(
                     }
                 }
                 is ReaderUiState.Content -> Column(Modifier.fillMaxSize()) {
+                    if (s.chapter.flagged) FlaggedBanner(rechecking = rechecking, onRecheck = viewModel::recheck)
                     VariantBar(
                         content = s,
                         busyVariants = processing.filter { it.first == s.chapter.id }.map { it.second }.toSet(),
@@ -257,6 +259,28 @@ private fun ChapterContent(
                 }
             }
         } }
+    }
+}
+
+/** Shown for chapters stored although the break check was unsure about them. */
+@Composable
+private fun FlaggedBanner(rechecking: Boolean, onRecheck: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            "This chapter may be incomplete.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.weight(1f),
+        )
+        if (rechecking) {
+            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+        } else {
+            TextButton(onClick = onRecheck) { Text("Refetch & recheck") }
+        }
     }
 }
 

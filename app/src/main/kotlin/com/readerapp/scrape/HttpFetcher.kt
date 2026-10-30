@@ -75,7 +75,8 @@ private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont 
         }
 
         override fun onResponse(call: Call, response: Response) {
-            cont.resume(response)
+            // If the caller was cancelled between resume and delivery, the response must still be closed.
+            cont.resume(response) { response.close() }
         }
     })
     cont.invokeOnCancellation { runCatching { cancel() } }

@@ -120,7 +120,7 @@ class WorkRepairScheduler @Inject constructor(@ApplicationContext private val co
     /** Manual "regenerate now" from the adapters screen. Same unique work name as repair: one job per domain. */
     fun scheduleRegenerate(domain: String) = enqueue(domain, AdapterWorker.MODE_REGENERATE, null, null)
 
-    private fun enqueue(domain: String, mode: String, pageUrl: String?, novelUrl: String?) {
+    fun enqueue(domain: String, mode: String, pageUrl: String?, novelUrl: String?) {
         val request = OneTimeWorkRequestBuilder<AdapterWorker>()
             .setInputData(
                 workDataOf(
@@ -145,11 +145,13 @@ class AdapterWorker @AssistedInject constructor(
     private val orchestrator: RepairOrchestrator,
     private val novels: NovelRepository,
     private val toc: TocScheduler,
+    private val resumer: com.readerapp.ai.resume.SpendResumer,
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
         val domain = inputData.getString(KEY_DOMAIN) ?: return Result.failure()
-        val outcome = when (inputData.getString(KEY_MODE)) {
+        val mode = inputData.getString(KEY_MODE)
+        val outcome = when (mode) {
             MODE_GENERATE -> {
                 val url = inputData.getString(KEY_PAGE_URL) ?: return Result.failure()
                 orchestrator.generate(domain, url, inputData.getString(KEY_NOVEL_URL))
@@ -161,7 +163,21 @@ class AdapterWorker @AssistedInject constructor(
         if (outcome is RepairOutcome.Fixed || outcome is RepairOutcome.Reactivated || outcome is RepairOutcome.NotNeeded) {
             runCatching { novels.withoutToc(domain).forEach { toc.schedule(it.id) } }
         }
-        return if (outcome is RepairOutcome.Transient && runAttemptCount < MAX_RETRIES) Result.retry() else Result.success()
+        if (outcome is RepairOutcome.SpendCapReached) {
+            // Durable pause: resumes at the next budget period or as soon as the cap is raised.
+            resumer.defer(
+                com.readerapp.ai.resume.DeferredJob.Adapter(
+                    domain, mode ?: MODE_REPAIR, inputData.getString(KEY_PAGE_URL), inputData.getString(KEY_NOVEL_URL),
+                ),
+            )
+            return Result.success()
+        }
+        return when {
+            outcome is RepairOutcome.Transient && runAttemptCount < MAX_RETRIES -> Result.retry()
+            // Verification was not available (outage): nothing is wrong with the adapter, so keep trying much longer.
+            outcome is RepairOutcome.VerifierUnavailable && runAttemptCount < MAX_VERIFIER_RETRIES -> Result.retry()
+            else -> Result.success()
+        }
     }
 
     companion object {
@@ -173,5 +189,6 @@ class AdapterWorker @AssistedInject constructor(
         const val MODE_REPAIR = "repair"
         const val MODE_REGENERATE = "regenerate"
         private const val MAX_RETRIES = 3
+        private const val MAX_VERIFIER_RETRIES = 8
     }
 }

@@ -17,6 +17,7 @@ import com.anthropic.models.messages.TextBlockParam
 import com.readerapp.data.settings.SecureSettings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -68,7 +69,19 @@ class ClaudeClient @Inject constructor(
         val client = client()
         val params = buildParams(request)
         val message = try {
-            withContext(Dispatchers.IO) { client.messages().create(params) }
+            // Usage is recorded inside the IO block (protected from cancellation): the blocking SDK call cannot be
+            // interrupted, so a cancelled caller would otherwise lose the result, and the cost with it.
+            blockingThenRecord(
+                call = { client.messages().create(params) },
+                record = { m ->
+                    val u = m.usage()
+                    usage.record(
+                        request.model, request.purpose,
+                        effectiveInputTokens(u.inputTokens(), u.cacheCreationInputTokens().orElse(0), u.cacheReadInputTokens().orElse(0)),
+                        u.outputTokens(),
+                    )
+                },
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: AnthropicServiceException) {
@@ -81,9 +94,6 @@ class ClaudeClient @Inject constructor(
         val u = message.usage()
         val input = effectiveInputTokens(u.inputTokens(), u.cacheCreationInputTokens().orElse(0), u.cacheReadInputTokens().orElse(0))
         val output = u.outputTokens()
-        // Tokens were spent whatever the outcome, so record before inspecting the stop reason.
-        runCatching { usage.record(request.model, request.purpose, input, output) }
-
         val stop = message.stopReason().orElse(null)
         when (stop) {
             StopReason.REFUSAL -> throw LlmException.Refused(
@@ -141,7 +151,7 @@ class ClaudeClient @Inject constructor(
             throw translate(e)
         } finally {
             if (input > 0 || output > 0) {
-                withContext(kotlinx.coroutines.NonCancellable) { runCatching { usage.record(request.model, request.purpose, input, output) } }
+                withContext(NonCancellable) { runCatching { usage.record(request.model, request.purpose, input, output) } }
             }
         }
         when (stop) {
@@ -232,3 +242,15 @@ class ClaudeClient @Inject constructor(
             input + Math.round(cacheWrite * 1.25 + cacheRead * 0.1)
     }
 }
+
+/**
+ * Runs the blocking [call] on Dispatchers.IO and then [record] (shielded from cancellation) *inside* the same IO
+ * block, i.e. before the result crosses back to a caller that may have been cancelled in the meantime. The result is
+ * still delivered normally; a cancelled caller just sees the CancellationException afterwards, with the spend booked.
+ */
+internal suspend fun <T> blockingThenRecord(call: () -> T, record: suspend (T) -> Unit): T =
+    withContext(Dispatchers.IO) {
+        val result = call()
+        withContext(NonCancellable) { runCatching { record(result) } }
+        result
+    }

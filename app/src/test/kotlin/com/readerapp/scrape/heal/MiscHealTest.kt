@@ -67,9 +67,9 @@ class MiscHealTest {
             override suspend fun run(code: String, html: String, pageUrl: String) = out
         }
         val runner = JsAdapterRunner(sandbox)
-        assertTrue(runner.validate("garbage", "t") is com.readerapp.scrape.ExtractionResult.Failure)
-        assertTrue(runner.validate("""{"paragraphs":[]}""", "t") is com.readerapp.scrape.ExtractionResult.Failure)
-        assertTrue(runner.validate("""{"title":"x","paragraphs":["real text"]}""", "t") is com.readerapp.scrape.ExtractionResult.Success)
+        assertTrue(runner.validate("garbage", "t", "https://site.example/ch") is com.readerapp.scrape.ExtractionResult.Failure)
+        assertTrue(runner.validate("""{"paragraphs":[]}""", "t", "https://site.example/ch") is com.readerapp.scrape.ExtractionResult.Failure)
+        assertTrue(runner.validate("""{"title":"x","paragraphs":["real text"]}""", "t", "https://site.example/ch") is com.readerapp.scrape.ExtractionResult.Success)
     }
 
     // ---- writer parsing

@@ -89,8 +89,29 @@ class ChapterRepository @Inject constructor(
     }
 
     /**
-     * Stores the extracted ORIGINAL text for [chapter], marks it FETCHED and registers the neighbouring
-     * chapters (as NOT_FETCHED placeholders) discovered from the page's next/prev links.
+     * Like [insertIfAbsent] but exactly at position [index]: chapters already at or after it move one place back, so a
+     * chapter learned from a next/prev link lands between its real neighbours instead of after unrelated imports.
+     */
+    suspend fun insertAt(novelId: Long, url: String, index: Int, title: String = ""): Chapter = db.withTransaction {
+        chapters.findByUrl(novelId, url)?.let { return@withTransaction it }
+        chapters.shiftFrom(novelId, index, 1)
+        chapters.insert(Chapter(novelId = novelId, index = index, title = title, url = url))
+        checkNotNull(chapters.findByUrl(novelId, url))
+    }
+
+    /** Registers the chapter that follows [chapter] according to a freshly read page; no-op when already known. */
+    suspend fun registerNext(chapter: Chapter, nextUrl: String): Chapter? {
+        val cur = chapters.get(chapter.id) ?: return null
+        if (nextUrl == cur.url) return null
+        return insertAt(cur.novelId, nextUrl, cur.index + 1)
+    }
+
+    /**
+     * Stores the extracted ORIGINAL text for [chapter], marks it FETCHED (flagged = "possibly incomplete" when the
+     * verifier was unsure) and registers the neighbouring chapters discovered from the page's next/prev links.
+     * The links are the truth about adjacency: a link target not yet in the novel is inserted directly after/before
+     * this chapter even when other chapters (e.g. a later, non-adjacent import) already sit further along.
+     * Replacing different original text drops the Fixed/Translated variants derived from the old one.
      */
     suspend fun storeFetched(
         chapter: Chapter,
@@ -98,22 +119,25 @@ class ChapterRepository @Inject constructor(
         paragraphs: List<String>,
         nextUrl: String?,
         prevUrl: String?,
+        flagged: Boolean = false,
     ) = db.withTransaction {
         val now = System.currentTimeMillis()
-        texts.upsert(ChapterText(chapter.id, TextVariant.ORIGINAL, paragraphs, model = null, createdAt = now))
+        val cur = chapters.get(chapter.id) ?: chapter
+        val old = texts.get(cur.id, TextVariant.ORIGINAL)
+        if (old != null && old.paragraphs != paragraphs) {
+            texts.delete(cur.id, TextVariant.FIXED)
+            texts.delete(cur.id, TextVariant.TRANSLATED)
+        }
+        texts.upsert(ChapterText(cur.id, TextVariant.ORIGINAL, paragraphs, model = null, createdAt = now))
         chapters.update(
-            chapter.copy(
-                title = title?.takeIf { it.isNotBlank() } ?: chapter.title,
+            cur.copy(
+                title = title?.takeIf { it.isNotBlank() } ?: cur.title,
                 status = ChapterStatus.FETCHED,
                 fetchedAt = now,
+                flagged = flagged,
             ),
         )
-        // Only extend the chain at its ends; a chapter in the middle already has neighbours.
-        if (nextUrl != null && nextUrl != chapter.url && chapters.nextAfter(chapter.novelId, chapter.index, chapter.id) == null) {
-            insertIfAbsent(chapter.novelId, nextUrl, chapter.index + 1)
-        }
-        if (prevUrl != null && prevUrl != chapter.url && chapters.previousBefore(chapter.novelId, chapter.index, chapter.id) == null) {
-            insertIfAbsent(chapter.novelId, prevUrl, chapter.index - 1)
-        }
+        if (nextUrl != null && nextUrl != cur.url) insertAt(cur.novelId, nextUrl, cur.index + 1)
+        if (prevUrl != null && prevUrl != cur.url) insertAt(cur.novelId, prevUrl, cur.index)
     }
 }

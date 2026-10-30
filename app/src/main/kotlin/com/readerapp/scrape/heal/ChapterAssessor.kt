@@ -11,7 +11,18 @@ import javax.inject.Singleton
  * Result of break detection for one extraction. [verified] is false when only the rule checks ran
  * (verifier unavailable), in which case [decision] ACCEPT means "nothing looked wrong", not "confirmed".
  */
-data class Assessment(val decision: Decision, val verdict: VerdictResult, val verified: Boolean) {
+data class Assessment(
+    val decision: Decision,
+    val verdict: VerdictResult,
+    val verified: Boolean,
+    /**
+     * No verifier could be consulted (not an adapter defect). [decision] is then only ACCEPT in the sense of "the rules
+     * found nothing wrong". Callers must not treat this as a failed adapter; repair defers instead.
+     */
+    val verifierUnavailable: Boolean = false,
+    /** The verifier is unavailable because the monthly spend cap is reached (work resumes with the next budget). */
+    val spendCapReached: Boolean = false,
+) {
     /** Confirmed good by a verifier (VALID >= 0.90). Required before an adapter version is trusted. */
     val confirmedValid: Boolean get() = decision == Decision.ACCEPT && verified
 }
@@ -40,6 +51,8 @@ class ChapterAssessor @Inject constructor(private val verifier: ExtractionVerifi
                     Decision.ACCEPT,
                     VerdictResult(Verdict.VALID_CHAPTER, 0.0, "none", "no verifier available: ${e.message}"),
                     verified = false,
+                    verifierUnavailable = true,
+                    spendCapReached = e.spendCap,
                 )
             }
             last = verdict

@@ -13,3 +13,4 @@
 *.keystore
 *.jks
 .kotlin/
+.claude/

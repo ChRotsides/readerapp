@@ -50,6 +50,13 @@ sealed interface RepairOutcome {
     data class PageProblem(val reason: String) : RepairOutcome
     /** Transient (rate limit, network): the caller may retry later. */
     data class Transient(val reason: String) : RepairOutcome
+    /**
+     * No verifier could judge a candidate (outage, not the adapter's fault). Nothing was given up on and no authoring
+     * attempt was consumed for it; the candidate is kept and re-checked first on the next run.
+     */
+    data class VerifierUnavailable(val reason: String) : RepairOutcome
+    /** The world changed while repairing (e.g. the user activated a version): the result was kept but not activated. */
+    data object Stale : RepairOutcome
     data class GaveUp(val reason: String) : RepairOutcome
 }
 
@@ -58,6 +65,9 @@ data class RepairConfig(
     val sonnetAttempts: Int = 3,
     val samplePages: Int = 2,
 )
+
+/** A model-written adapter that is waiting for a verifier to judge it. */
+data class PendingCandidate(val kind: com.readerapp.data.db.AdapterKind, val code: String, val writtenBy: String?)
 
 /** Serialized form of an extraction, stored in `AdapterFixture.expectedOutput`. */
 @Serializable
@@ -102,10 +112,15 @@ class RepairOrchestrator @Inject constructor(
 
     private val locks = ConcurrentHashMap<String, Mutex>()
 
+    /** Candidates that could not be verified because no verifier was reachable; re-checked before paying for new ones. */
+    private val pendingCandidates = ConcurrentHashMap<String, PendingCandidate>()
+
     private sealed interface Validation {
         data object Pass : Validation
         data class Fail(val reason: String) : Validation
         data class PageProblem(val verdict: VerdictResult) : Validation
+        /** No verifier available: says nothing about the adapter. [spendCap] = because the budget is used up. */
+        data class Unavailable(val reason: String, val spendCap: Boolean) : Validation
     }
 
     private data class Tier(val model: String, val effort: LlmEffort, val attempts: Int)
@@ -117,7 +132,7 @@ class RepairOrchestrator @Inject constructor(
             val page = pages.fetch(pageUrl) ?: return@exclusive RepairOutcome.Transient("Could not fetch $pageUrl")
             val novelPage = novelUrl?.takeIf { it != pageUrl }?.let { pages.fetch(it) }
             val tiers = listOf(Tier(ClaudeModels.SONNET, LlmEffort.HIGH, config.sonnetAttempts))
-            val outcome = writeLoop(domain, page, tiers, previous = null, novelPage = novelPage, samples = false, nextVersion = 1)
+            val outcome = writeLoop(domain, page, tiers, previous = null, expectedActive = null, novelPage = novelPage, samples = false, nextVersion = 1)
             if (outcome is RepairOutcome.Fixed) notifier.generated(domain, outcome.adapter.version)
             else if (outcome is RepairOutcome.GaveUp) giveUp(domain, outcome.reason, notify = true)
             outcome
@@ -142,14 +157,16 @@ class RepairOrchestrator @Inject constructor(
         for (old in versions.filter { it.version < broken.version }) {
             when (val v = validate(old, page)) {
                 Validation.Pass -> {
-                    store.setStatus(domain, broken.version, AdapterStatus.BROKEN)
-                    store.setStatus(domain, old.version, AdapterStatus.ACTIVE)
+                    if (!store.swapActive(domain, active?.version, old.version, AdapterStatus.BROKEN)) {
+                        return@exclusive RepairOutcome.Stale
+                    }
                     store.resetFailures(old)
                     clearState(domain, "Restored v${old.version}")
                     notifier.fixed(domain, old.version, restored = true)
                     return@exclusive RepairOutcome.Reactivated(old.copy(status = AdapterStatus.ACTIVE))
                 }
                 is Validation.PageProblem -> return@exclusive pageProblem(domain, v.verdict)
+                is Validation.Unavailable -> return@exclusive unavailable(v)
                 is Validation.Fail -> Unit
             }
         }
@@ -160,7 +177,7 @@ class RepairOrchestrator @Inject constructor(
             Tier(ClaudeModels.SONNET, LlmEffort.HIGH, config.sonnetAttempts),
         )
         val next = (versions.maxOf { it.version }) + 1
-        val outcome = writeLoop(domain, page, tiers, previous = broken, novelPage = null, samples = true, nextVersion = next)
+        val outcome = writeLoop(domain, page, tiers, previous = broken, expectedActive = active?.version, novelPage = null, samples = true, nextVersion = next)
         when (outcome) {
             is RepairOutcome.Fixed -> notifier.fixed(domain, outcome.adapter.version, restored = false)
             is RepairOutcome.GaveUp -> giveUp(domain, outcome.reason, notify = true) // (d)
@@ -190,10 +207,13 @@ class RepairOrchestrator @Inject constructor(
         }
     }
 
+    /**
+     * The page to repair against, always a fresh, complete fetch: the failing URL first, else the newest stored
+     * chapter. The trimmed snapshot kept in the domain state is lossy (it is for prompts and diagnostics) and must
+     * never be executed against or committed as the fixture of a new version.
+     */
     private suspend fun failingPage(domain: String, state: DomainState?): FetchedPage? {
-        val url = state?.failingUrl
-        val html = state?.failingHtml
-        if (url != null && html != null) return FetchedPage(url, html, com.readerapp.scrape.FetchMode.HTTP)
+        state?.failingUrl?.let { url -> pages.fetch(url)?.let { return it } }
         val latest = pages.latestChapterUrl(domain) ?: return null
         return pages.fetch(latest)
     }
@@ -203,6 +223,7 @@ class RepairOrchestrator @Inject constructor(
         page: FetchedPage,
         tiers: List<Tier>,
         previous: SiteAdapter?,
+        expectedActive: Int?,
         novelPage: FetchedPage?,
         samples: Boolean,
         nextVersion: Int,
@@ -212,6 +233,22 @@ class RepairOrchestrator @Inject constructor(
         val example = previous?.let { store.fixtures(domain).firstOrNull() }
             ?.let { FixtureOutput.parse(it.expectedOutput)?.summary() }
         val feedback = ArrayList<String>()
+
+        // A candidate bought earlier whose verification was unavailable gets checked again before paying for another.
+        pendingCandidates.remove(domain)?.let { pending ->
+            val adapter = SiteAdapter(
+                domain = domain, version = nextVersion, kind = pending.kind, code = pending.code,
+                writtenBy = pending.writtenBy, status = AdapterStatus.RETIRED,
+            )
+            when (val outcome = checkCandidate(adapter, domain, page, samples)) {
+                is Check.Done -> return commit(adapter, previous, expectedActive, page, trimmed.html)
+                is Check.Stop -> {
+                    if (outcome.keep) pendingCandidates[domain] = pending
+                    return outcome.outcome
+                }
+                is Check.Rejected -> feedback += outcome.feedback
+            }
+        }
 
         for (tier in tiers) {
             repeat(tier.attempts) {
@@ -244,47 +281,64 @@ class RepairOrchestrator @Inject constructor(
                     return RepairOutcome.GaveUp(e.message ?: "API error")
                 }
 
+                // Written inactive: it only becomes ACTIVE through the atomic swap in commit().
                 val adapter = SiteAdapter(
                     domain = domain,
                     version = nextVersion,
                     kind = candidate.kind,
                     code = candidate.code,
                     writtenBy = tier.model,
-                    status = AdapterStatus.ACTIVE,
+                    status = AdapterStatus.RETIRED,
                 )
-                when (val v = validate(adapter, page)) {
-                    is Validation.PageProblem -> return pageProblem(domain, v.verdict)
-                    is Validation.Fail -> {
-                        feedback += "Attempt with ${tier.model} failed on the target page: ${v.reason}"
-                        return@repeat
+                when (val outcome = checkCandidate(adapter, domain, page, samples)) {
+                    is Check.Done -> return commit(adapter, previous, expectedActive, page, trimmed.html)
+                    is Check.Stop -> {
+                        // Not the adapter's fault and not a spent attempt: keep it and finish, retry later.
+                        if (outcome.keep) pendingCandidates[domain] = PendingCandidate(adapter.kind, adapter.code, adapter.writtenBy)
+                        return outcome.outcome
                     }
-                    Validation.Pass -> Unit
-                }
-                if (samples) {
-                    val failure = validateSamples(adapter, domain, page.url)
-                    if (failure != null) {
-                        feedback += failure
+                    is Check.Rejected -> {
+                        feedback += outcome.feedback.replace("Attempt failed", "Attempt with ${tier.model} failed")
                         return@repeat
                     }
                 }
-                return commit(adapter, previous, page, trimmed.html)
             }
         }
         return RepairOutcome.GaveUp("No valid adapter after ${tiers.sumOf { it.attempts }} attempts. " + feedback.lastOrNull().orEmpty())
     }
 
-    /** Re-fetches up to [RepairConfig.samplePages] other stored chapters of the domain; returns a feedback line on failure. */
-    private suspend fun validateSamples(adapter: SiteAdapter, domain: String, excludeUrl: String): String? {
-        for (url in pages.sampleUrls(domain, excludeUrl, config.samplePages)) {
-            val sample = pages.fetch(url) ?: continue
-            when (val v = validate(adapter, sample)) {
-                Validation.Pass -> Unit
-                is Validation.PageProblem -> Unit // that sample is locked/blocked: says nothing about the adapter
-                is Validation.Fail -> return "The adapter worked on the target page but failed on another chapter ($url): ${v.reason}"
+    private sealed interface Check {
+        data object Done : Check
+        /** Failed on the page or a sample; the feedback goes into the next authoring prompt. */
+        data class Rejected(val feedback: String) : Check
+        /** The run ends with [outcome]; [keep] = remember the candidate for the next run. */
+        data class Stop(val outcome: RepairOutcome, val keep: Boolean) : Check
+    }
+
+    /** Validates a candidate on the target page and (for repairs) on sample chapters. */
+    private suspend fun checkCandidate(adapter: SiteAdapter, domain: String, page: FetchedPage, samples: Boolean): Check {
+        when (val v = validate(adapter, page)) {
+            is Validation.PageProblem -> return Check.Stop(pageProblem(domain, v.verdict), keep = false)
+            is Validation.Unavailable -> return Check.Stop(unavailable(v), keep = true)
+            is Validation.Fail -> return Check.Rejected("Attempt failed on the target page: ${v.reason}")
+            Validation.Pass -> Unit
+        }
+        if (samples) {
+            for (url in pages.sampleUrls(domain, page.url, config.samplePages)) {
+                val sample = pages.fetch(url) ?: continue
+                when (val v = validate(adapter, sample)) {
+                    Validation.Pass -> Unit
+                    is Validation.PageProblem -> Unit // that sample is locked/blocked: says nothing about the adapter
+                    is Validation.Unavailable -> return Check.Stop(unavailable(v), keep = true)
+                    is Validation.Fail -> return Check.Rejected("The adapter worked on the target page but failed on another chapter ($url): ${v.reason}")
+                }
             }
         }
-        return null
+        return Check.Done
     }
+
+    private fun unavailable(v: Validation.Unavailable): RepairOutcome =
+        if (v.spendCap) RepairOutcome.SpendCapReached else RepairOutcome.VerifierUnavailable(v.reason)
 
     private suspend fun validate(adapter: SiteAdapter, page: FetchedPage): Validation {
         when (val result = runtime.execute(adapter, page)) {
@@ -294,6 +348,7 @@ class RepairOrchestrator @Inject constructor(
             }
             is ExtractionResult.Success -> {
                 val a = assessor.assess(page, result.chapter)
+                if (a.verifierUnavailable) return Validation.Unavailable(a.verdict.reason ?: "no verifier available", a.spendCapReached)
                 return when {
                     a.confirmedValid -> Validation.Pass
                     a.decision == Decision.ADAPTER_FAILURE || a.decision == Decision.AMBIGUOUS ->
@@ -305,7 +360,13 @@ class RepairOrchestrator @Inject constructor(
         }
     }
 
-    private suspend fun commit(adapter: SiteAdapter, previous: SiteAdapter?, page: FetchedPage, trimmedHtml: String): RepairOutcome {
+    private suspend fun commit(
+        adapter: SiteAdapter,
+        previous: SiteAdapter?,
+        expectedActive: Int?,
+        page: FetchedPage,
+        trimmedHtml: String,
+    ): RepairOutcome {
         val extracted = (runtime.execute(adapter, page) as? ExtractionResult.Success)?.chapter
         val fixtureId = store.saveFixture(
             AdapterFixture(
@@ -315,9 +376,15 @@ class RepairOrchestrator @Inject constructor(
                 expectedOutput = extracted?.let { FixtureOutput.of(it).toJson() } ?: "{}",
             ),
         )
-        val saved = adapter.copy(fixtureId = fixtureId, status = AdapterStatus.ACTIVE, lastSuccessAt = System.currentTimeMillis())
-        store.save(saved)
+        // Stored inactive first (versions are append-only), then activated by one atomic compare-and-swap: if the
+        // domain's ACTIVE version is no longer the one this repair started from (the user activated another version
+        // meanwhile), the result stays as history and nothing is switched.
+        val stored = adapter.copy(fixtureId = fixtureId, status = AdapterStatus.RETIRED, lastSuccessAt = System.currentTimeMillis())
+        store.save(stored)
+        if (!store.swapActive(adapter.domain, expectedActive, stored.version, AdapterStatus.BROKEN)) return RepairOutcome.Stale
+        // A BROKEN predecessor that was not ACTIVE any more stays BROKEN (never reverts to a usable state).
         previous?.let { store.setStatus(it.domain, it.version, AdapterStatus.BROKEN) }
+        val saved = stored.copy(status = AdapterStatus.ACTIVE)
         clearState(adapter.domain, "Now v${saved.version} (${saved.writtenBy})")
         return RepairOutcome.Fixed(saved)
     }

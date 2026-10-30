@@ -8,10 +8,11 @@ import android.os.Looper
 import android.webkit.CookieManager
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -41,80 +42,89 @@ class WebViewFetcher @Inject constructor(
     ): FetchedPage {
         rateLimiter.limiter.acquire(url)
         return withContext(Dispatchers.Main.immediate) {
+            val handler = Handler(Looper.getMainLooper())
+            val webView = WebView(context)
             try {
-                withTimeout(timeoutMs) { load(url, settleMs) }
+                withTimeout(timeoutMs) { load(webView, handler, url, settleMs) }
             } catch (e: TimeoutCancellationException) {
                 throw FetchException("WebView timed out after ${timeoutMs}ms for $url", cause = e)
+            } finally {
+                // Always runs, also on cancellation, and on the main thread where WebView must be destroyed.
+                withContext(NonCancellable) {
+                    handler.removeCallbacksAndMessages(null)
+                    runCatching { webView.stopLoading(); webView.destroy() }
+                }
             }
         }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun load(url: String, settleMs: Long): FetchedPage = suspendCancellableCoroutine { cont ->
-        val handler = Handler(Looper.getMainLooper())
-        val webView = WebView(context)
-        var finished = false
-        fun finish(block: CancellableContinuation<FetchedPage>.() -> Unit) {
-            if (finished) return
-            finished = true
-            handler.removeCallbacksAndMessages(null)
-            cont.block()
-            webView.stopLoading()
-            webView.destroy()
-        }
+    private suspend fun load(webView: WebView, handler: Handler, url: String, settleMs: Long): FetchedPage =
+        suspendCancellableCoroutine { cont ->
+            var settle: Runnable? = null
+            // Status of the main-frame response of the navigation currently in flight (reset on every navigation).
+            var mainFrameStatus: Int? = null
 
-        webView.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            userAgentString = UserAgents.DESKTOP
-            loadsImagesAutomatically = false
-            blockNetworkImage = true
-        }
-        CookieManager.getInstance().setAcceptCookie(true)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
+            webView.settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                userAgentString = UserAgents.DESKTOP
+                loadsImagesAutomatically = false
+                blockNetworkImage = true
+            }
+            CookieManager.getInstance().setAcceptCookie(true)
+            CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 
-        webView.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
-                // Redirect chains restart the settle timer.
-                handler.removeCallbacksAndMessages(null)
+            fun cancelSettle() {
+                settle?.let { handler.removeCallbacks(it) }
+                settle = null
             }
 
-            override fun onPageFinished(view: WebView, finishedUrl: String?) {
-                handler.removeCallbacksAndMessages(null)
-                handler.postDelayed({
-                    if (finished) return@postDelayed
-                    view.evaluateJavascript("(function(){return document.documentElement.outerHTML;})()") { raw ->
-                        val html = decodeJsString(raw)
-                        val finalUrl = view.url ?: url
-                        finish {
+            webView.webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
+                    // Redirect chains (and JS challenges that reload) restart the settle timer and the status.
+                    cancelSettle()
+                    mainFrameStatus = null
+                }
+
+                override fun onPageFinished(view: WebView, finishedUrl: String?) {
+                    cancelSettle()
+                    val task = Runnable {
+                        if (!cont.isActive) return@Runnable
+                        val status = mainFrameStatus
+                        if (status != null) {
+                            // An HTTP error page is not a chapter: never hand its DOM to extraction.
+                            cont.resumeWithException(FetchException("HTTP $status for $url", status))
+                            return@Runnable
+                        }
+                        view.evaluateJavascript("(function(){return document.documentElement.outerHTML;})()") { raw ->
+                            if (!cont.isActive) return@evaluateJavascript
+                            val html = decodeJsString(raw)
+                            val finalUrl = view.url ?: url
                             if (html.isNullOrEmpty()) {
-                                resumeWithException(FetchException("WebView returned empty DOM for $url"))
+                                cont.resumeWithException(FetchException("WebView returned empty DOM for $url"))
                             } else {
-                                resume(FetchedPage(finalUrl, html, FetchMode.WEBVIEW))
+                                cont.resume(FetchedPage(finalUrl, html, FetchMode.WEBVIEW))
                             }
                         }
                     }
-                }, settleMs)
-            }
+                    settle = task
+                    handler.postDelayed(task, settleMs)
+                }
 
-            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-                if (request.isForMainFrame) {
-                    finish { resumeWithException(FetchException("WebView error ${error.errorCode}: ${error.description}")) }
+                override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
+                    if (request.isForMainFrame && errorResponse.statusCode >= 400) mainFrameStatus = errorResponse.statusCode
+                }
+
+                override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                    if (request.isForMainFrame && cont.isActive) {
+                        cont.resumeWithException(FetchException("WebView error ${error.errorCode}: ${error.description}"))
+                    }
                 }
             }
+            cont.invokeOnCancellation { handler.post { cancelSettle() } }
+            webView.loadUrl(url)
         }
-        cont.invokeOnCancellation {
-            handler.post {
-                if (!finished) {
-                    finished = true
-                    handler.removeCallbacksAndMessages(null)
-                    webView.stopLoading()
-                    webView.destroy()
-                }
-            }
-        }
-        webView.loadUrl(url)
-    }
 
     companion object {
         const val DEFAULT_TIMEOUT_MS = 40_000L

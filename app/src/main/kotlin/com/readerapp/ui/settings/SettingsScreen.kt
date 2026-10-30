@@ -77,6 +77,8 @@ fun SettingsScreen(onBack: () -> Unit, onOpenAdapters: () -> Unit, viewModel: Se
             SecretField("Jev base URL", secrets.jevBaseUrl, masked = false,
                 onSave = { viewModel.saveSecret(SecretKeyName.JEV_BASE_URL, it) },
                 onClear = { viewModel.clearSecret(SecretKeyName.JEV_BASE_URL) })
+            val settingsError by viewModel.error.collectAsStateWithLifecycle()
+            settingsError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
 
             HorizontalDivider()
             Text("AI spending", style = MaterialTheme.typography.titleMedium)

@@ -32,5 +32,7 @@ abstract class HealModule {
     @Binds abstract fun pageSource(impl: DefaultPageSource): PageSource
     @Binds abstract fun notifier(impl: AndroidAdapterNotifier): AdapterNotifier
     @Binds abstract fun tocStore(impl: com.readerapp.scrape.toc.RoomTocStore): com.readerapp.scrape.toc.TocStore
+    @Binds abstract fun deferredDispatcher(impl: com.readerapp.ai.resume.WorkJobDispatcher): com.readerapp.ai.resume.DeferredJobDispatcher
+    @Binds abstract fun spendResumeScheduler(impl: com.readerapp.ai.resume.WorkSpendResumeScheduler): com.readerapp.ai.resume.SpendResumeScheduler
     @Binds abstract fun scheduler(impl: WorkRepairScheduler): RepairScheduler
 }

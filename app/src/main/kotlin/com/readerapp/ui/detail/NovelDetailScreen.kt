@@ -79,6 +79,7 @@ fun NovelDetailScreen(
     val refreshing by viewModel.refreshing.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
     val defaultTarget by viewModel.defaultTargetLanguage.collectAsStateWithLifecycle()
+    val rechecking by viewModel.rechecking.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(message) { message?.let { snackbar.showSnackbar(it); viewModel.messageShown() } }
 
@@ -144,15 +145,28 @@ fun NovelDetailScreen(
                 HorizontalDivider()
             }
             itemsIndexed(chapters, key = { _, c -> c.id }) { position, chapter ->
-                ChapterRow(position + 1, chapter, isCurrent = chapter.id == n.lastReadChapterId, onClick = { onOpenChapter(chapter.id) })
+                ChapterRow(
+                    position + 1, chapter, isCurrent = chapter.id == n.lastReadChapterId,
+                    rechecking = chapter.id in rechecking,
+                    onRecheck = { viewModel.recheck(chapter.id) },
+                    onClick = { onOpenChapter(chapter.id) },
+                )
             }
         }
     }
 }
 
 @Composable
-private fun ChapterRow(position: Int, chapter: Chapter, isCurrent: Boolean, onClick: () -> Unit) {
+private fun ChapterRow(
+    position: Int,
+    chapter: Chapter,
+    isCurrent: Boolean,
+    rechecking: Boolean,
+    onRecheck: () -> Unit,
+    onClick: () -> Unit,
+) {
     val (icon, label) = statusVisual(chapter.status)
+    val flagged = chapter.flagged && chapter.status == ChapterStatus.FETCHED
     ListItem(
         modifier = Modifier.clickable(onClick = onClick),
         headlineContent = {
@@ -163,9 +177,24 @@ private fun ChapterRow(position: Int, chapter: Chapter, isCurrent: Boolean, onCl
                 fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
             )
         },
-        supportingContent = { Text(label + if (chapter.read) " - read" else "") },
+        supportingContent = {
+            Text(
+                label + (if (flagged) " - possibly incomplete" else "") + (if (chapter.read) " - read" else ""),
+                color = if (flagged) MaterialTheme.colorScheme.error else androidx.compose.ui.graphics.Color.Unspecified,
+            )
+        },
         leadingContent = { Text("$position", style = MaterialTheme.typography.labelLarge) },
-        trailingContent = { Icon(icon, label) },
+        trailingContent = {
+            if (flagged) {
+                if (rechecking) {
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                } else {
+                    IconButton(onClick = onRecheck) { Icon(Icons.Filled.Refresh, "Refetch and recheck this chapter") }
+                }
+            } else {
+                Icon(icon, label)
+            }
+        },
     )
 }
 

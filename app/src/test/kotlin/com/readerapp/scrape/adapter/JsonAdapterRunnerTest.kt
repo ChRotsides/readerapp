@@ -112,14 +112,4 @@ class JsonAdapterRunnerTest {
         val s = JsonAdapterSpec.parse("""{"chapter":{"content":"#c","title":null,"remove":[],"extra":1},"cleanup":{"dropLines":[]},"novel":null}""")
         assertEquals("#c", s.chapter.content)
     }
-
-    @Test
-    fun catastrophicRegexIsAbortedNotHung() {
-        val evil = listOf("(a+)+$")
-        val text = "a".repeat(40) + "b"
-        val start = System.currentTimeMillis()
-        val out = JsonAdapterRunner.dropLines(listOf(text), evil)
-        assertTrue(System.currentTimeMillis() - start < 5_000)
-        assertEquals(listOf(text), out) // aborted match = not dropped
-    }
 }

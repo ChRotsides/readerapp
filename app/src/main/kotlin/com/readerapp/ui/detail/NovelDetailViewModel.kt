@@ -9,7 +9,9 @@ import com.readerapp.data.db.Novel
 import com.readerapp.data.repo.ChapterRepository
 import com.readerapp.data.repo.NovelRepository
 import com.readerapp.data.settings.ReaderPrefsRepository
+import com.readerapp.scrape.ChapterFetcher
 import com.readerapp.scrape.PrefetchScheduler
+import com.readerapp.scrape.RecheckOutcome
 import com.readerapp.ui.nav.NovelRoute
 import dagger.hilt.android.lifecycle.HiltViewModel
 import com.readerapp.ai.process.ProcessScheduler
@@ -35,6 +37,7 @@ class NovelDetailViewModel @Inject constructor(
     private val toc: TocImporter,
     private val aiSettings: AiSettings,
     private val processScheduler: ProcessScheduler,
+    private val fetcher: ChapterFetcher,
 ) : ViewModel() {
     private val novelId = savedStateHandle.toRoute<NovelRoute>().novelId
 
@@ -53,6 +56,29 @@ class NovelDetailViewModel @Inject constructor(
     /** Default target language from settings (shown as the hint for the per-novel override). */
     val defaultTargetLanguage: StateFlow<String> = aiSettings.targetLanguage
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AiSettings.DEFAULT_TARGET_LANGUAGE)
+
+    private val _rechecking = MutableStateFlow<Set<Long>>(emptySet())
+
+    /** Flagged chapters being refetched and rechecked right now. */
+    val rechecking: StateFlow<Set<Long>> = _rechecking.asStateFlow()
+
+    /** "Refetch & recheck" for a chapter flagged as possibly incomplete; the flag clears only on a confirmed-good copy. */
+    fun recheck(chapterId: Long) {
+        if (chapterId in _rechecking.value) return
+        _rechecking.value = _rechecking.value + chapterId
+        viewModelScope.launch {
+            try {
+                _message.value = when (val r = fetcher.refetchAndRecheck(chapterId)) {
+                    RecheckOutcome.Cleared -> "Checked again: the chapter looks complete."
+                    RecheckOutcome.StillUncertain -> "Still not sure this chapter is complete."
+                    is RecheckOutcome.NeedsBrowser -> r.reason
+                    is RecheckOutcome.Failed -> "Could not re-check: ${r.reason}"
+                }
+            } finally {
+                _rechecking.value = _rechecking.value - chapterId
+            }
+        }
+    }
 
     fun messageShown() {
         _message.value = null

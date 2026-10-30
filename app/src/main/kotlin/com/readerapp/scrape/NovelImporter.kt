@@ -15,6 +15,8 @@ data class ImportDraft(
     val page: FetchedPage,
     val extraction: ExtractionResult.Success,
     val suggestedTitle: String,
+    /** The verifier was unsure about this extraction: the chapter is stored flagged as possibly incomplete. */
+    val flagged: Boolean = false,
 )
 
 sealed interface ImportResult {
@@ -31,18 +33,38 @@ class NovelImporter @Inject constructor(
     private val adapters: AdapterStore,
     private val scheduler: RepairScheduler,
     private val toc: TocScheduler,
+    private val judge: ChapterJudge,
 ) {
-    suspend fun prepare(page: FetchedPage): Result<ImportDraft> =
-        when (val result = extractor.extract(page)) {
-            is ExtractionResult.Failure -> Result.failure(IllegalStateException(result.reason))
-            is ExtractionResult.Success -> {
-                val domain = DomainRateLimiter.domainOf(page.url)
-                val title = result.novelInfo?.title?.takeIf { it.isNotBlank() }
-                    ?: result.chapter.title?.takeIf { it.isNotBlank() }
-                    ?: domain
-                Result.success(ImportDraft(page, result, title))
-            }
+    /**
+     * Extracts the browser's page and runs the same break detection as a normal fetch, so a login page, teaser,
+     * error page or broken adapter result is rejected here instead of being stored as a FETCHED chapter.
+     */
+    suspend fun prepare(page: FetchedPage): Result<ImportDraft> {
+        val result = extractor.extract(page)
+        if (result is ExtractionResult.Failure) {
+            judge.account(null, listOf(judge.judgeFailure(page, result)))
+            return Result.failure(IllegalStateException(result.reason))
         }
+        val success = result as ExtractionResult.Success
+        val judgement = judge.judge(page, success, previous = null)
+        val chosen = judgement.accepted
+            ?: judgement.shortSuccess?.takeIf { !judgement.lockedHint }
+        judge.account(if (chosen != null) judgement.copy(accepted = chosen) else null, listOf(judgement))
+        if (chosen == null) {
+            val why = when {
+                judgement.lockedHint -> "This page looks locked (login or payment required)."
+                judgement.needsBrowser != null -> "This page looks like a login or bot-check page, not a chapter."
+                judgement.retryLater -> "This page looks like a site error page, not a chapter."
+                else -> judgement.reason ?: "No chapter text could be extracted."
+            }
+            return Result.failure(IllegalStateException(why))
+        }
+        val domain = DomainRateLimiter.domainOf(page.url)
+        val title = chosen.novelInfo?.title?.takeIf { it.isNotBlank() }
+            ?: chosen.chapter.title?.takeIf { it.isNotBlank() }
+            ?: domain
+        return Result.success(ImportDraft(page, chosen, title, flagged = judgement.flagged && judgement.accepted != null))
+    }
 
     suspend fun import(draft: ImportDraft, novelTitle: String): ImportResult {
         val page = draft.page
@@ -54,7 +76,7 @@ class NovelImporter @Inject constructor(
 
         chapters.findAnyByUrl(page.url)?.let { existing ->
             if (existing.status != com.readerapp.data.db.ChapterStatus.FETCHED) {
-                chapters.storeFetched(existing, chapterData.title, chapterData.paragraphs, chapterData.nextUrl, chapterData.prevUrl)
+                chapters.storeFetched(existing, chapterData.title, chapterData.paragraphs, chapterData.nextUrl, chapterData.prevUrl, draft.flagged)
             }
             return ImportResult.Imported(existing.novelId, existing.id)
         }
@@ -76,8 +98,8 @@ class NovelImporter @Inject constructor(
         if (existingNovel != null && existingNovel.novelUrl == null && novelUrl != null) novels.setNovelUrl(novelId, novelUrl)
 
         val index = if (existingNovel == null) 0 else indexInExisting(novelId, chapterData)
-        val chapter = chapters.insertIfAbsent(novelId, page.url, index, chapterData.title.orEmpty())
-        chapters.storeFetched(chapter, chapterData.title, chapterData.paragraphs, chapterData.nextUrl, chapterData.prevUrl)
+        val chapter = chapters.insertAt(novelId, page.url, index, chapterData.title.orEmpty())
+        chapters.storeFetched(chapter, chapterData.title, chapterData.paragraphs, chapterData.nextUrl, chapterData.prevUrl, draft.flagged)
         // Runs now when the domain's active adapter has TOC selectors; otherwise again once an adapter is generated.
         if (novelUrl != null || existingNovel?.novelUrl != null) toc.schedule(novelId)
         return ImportResult.Imported(novelId, chapter.id)
@@ -96,7 +118,7 @@ class NovelImporter @Inject constructor(
 
     private suspend fun indexInExisting(novelId: Long, data: ExtractedChapter): Int {
         data.prevUrl?.let { url -> chapters.findByUrl(novelId, url)?.let { return it.index + 1 } }
-        data.nextUrl?.let { url -> chapters.findByUrl(novelId, url)?.let { return it.index - 1 } }
+        data.nextUrl?.let { url -> chapters.findByUrl(novelId, url)?.let { return it.index } }
         val last = chapters.last(novelId)
         return (last?.index ?: -1) + 1
     }

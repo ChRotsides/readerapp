@@ -231,10 +231,60 @@ class RepairOrchestratorTest {
     }
 
     @Test
-    fun unverifiableCandidateIsNotTrusted() = runTest {
+    fun verifierOutageDefersWithoutBurningAttemptsAndCandidateIsRecheckedFirst() = runTest {
         val store = brokenStore(adapter(1, AdapterStatus.BROKEN, "bad"))
-        val s = Setup(store, FakeLlm(listOf(reply("good"))), verifier = { throw VerifierUnavailableException("down") })
-        assertTrue(s.orchestrator.repair(domain) is RepairOutcome.GaveUp)
+        var down = true
+        val llm = FakeLlm(listOf(reply("good")))
+        val s = Setup(
+            store, llm,
+            verifier = { if (down) throw VerifierUnavailableException("down") else VerdictResult(Verdict.VALID_CHAPTER, 0.99, "fake") },
+        )
+        val first = s.orchestrator.repair(domain)
+        assertTrue(first is RepairOutcome.VerifierUnavailable)
+        assertEquals(1, llm.requests.size)                       // one candidate bought, not six
+        assertEquals(AdapterStatus.BROKEN, store.get(domain, 1)!!.status)
+        assertNull(store.get(domain, 2)?.takeIf { it.status == AdapterStatus.ACTIVE }) // untrusted candidate never activated
+        assertFalse(s.notifier.events.contains("failed"))        // not given up on
+        assertNull(store.states[domain]!!.let { if (it.genericFallback) it else null })
+
+        down = false
+        val second = s.orchestrator.repair(domain)
+        assertTrue(second is RepairOutcome.Fixed)
+        assertEquals(1, llm.requests.size)                       // the retained candidate was verified, nothing re-bought
+        assertEquals(AdapterStatus.ACTIVE, store.get(domain, 2)!!.status)
+    }
+
+    @Test
+    fun spendCapDuringVerificationIsReportedAsSpendCap() = runTest {
+        val store = brokenStore(adapter(1, AdapterStatus.BROKEN, "bad"))
+        val s = Setup(store, FakeLlm(listOf(reply("good"))), verifier = { throw VerifierUnavailableException("cap", spendCap = true) })
+        assertEquals(RepairOutcome.SpendCapReached, s.orchestrator.repair(domain))
+    }
+
+    @Test
+    fun repairRefetchesFailingUrlInsteadOfUsingTheLossySnapshot() = runTest {
+        val store = brokenStore(adapter(1, AdapterStatus.BROKEN, "bad"))
+        val s = Setup(store, FakeLlm(listOf(reply("good"))))
+        s.orchestrator.repair(domain)
+        assertEquals("https://site.example/failing", s.pages.fetched.first())
+    }
+
+    @Test
+    fun staleRepairDoesNotActivateWhenUserActivatedAnotherVersionMeanwhile() = runTest {
+        val store = brokenStore(adapter(1, AdapterStatus.RETIRED, "bad"), adapter(2, AdapterStatus.BROKEN, "bad"))
+        val llm = FakeLlm(listOf(reply("good")), onCall = { kotlinx.coroutines.runBlocking { store.activateExclusive(domain, 1) } })
+        val s = Setup(store, llm)
+        val outcome = s.orchestrator.repair(domain)
+        assertEquals(RepairOutcome.Stale, outcome)
+        assertEquals(listOf(1), store.adapters.values.filter { it.status == AdapterStatus.ACTIVE }.map { it.version })
+        assertEquals(AdapterStatus.RETIRED, store.get(domain, 3)!!.status)   // kept as history, not active
+    }
+
+    @Test
+    fun exactlyOneActiveVersionAfterRepair() = runTest {
+        val store = brokenStore(adapter(1, AdapterStatus.RETIRED, "bad"), adapter(2, AdapterStatus.BROKEN, "bad"))
+        Setup(store, FakeLlm(listOf(reply("good")))).orchestrator.repair(domain)
+        assertEquals(1, store.adapters.values.count { it.status == AdapterStatus.ACTIVE })
     }
 
     @Test

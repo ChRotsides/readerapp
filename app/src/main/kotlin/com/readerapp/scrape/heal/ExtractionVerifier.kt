@@ -5,7 +5,12 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /** The verifier cannot give an answer right now (not configured, timeout, HTTP error, spend cap, ...). */
-class VerifierUnavailableException(message: String, cause: Throwable? = null) : Exception(message, cause)
+class VerifierUnavailableException(
+    message: String,
+    cause: Throwable? = null,
+    /** The reason is the monthly spend cap rather than an outage. */
+    val spendCap: Boolean = false,
+) : Exception(message, cause)
 
 /** Typed, probabilistic judgement of whether an extraction is a complete, correct chapter. */
 fun interface ExtractionVerifier {

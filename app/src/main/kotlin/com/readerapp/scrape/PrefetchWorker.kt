@@ -11,6 +11,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import com.readerapp.data.db.ChapterStatus
 import com.readerapp.data.repo.ChapterRepository
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
@@ -20,7 +21,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Fetches the next [KEY_COUNT] unfetched chapters after [KEY_CHAPTER_ID]. Spacing between requests
+ * Makes sure the next [KEY_COUNT] chapters after [KEY_CHAPTER_ID] are fetched. Spacing between requests
  * is enforced by the shared per-domain rate limiter inside the fetchers.
  */
 @HiltWorker
@@ -34,16 +35,24 @@ class PrefetchWorker @AssistedInject constructor(
     override suspend fun doWork(): Result {
         val start = chapters.get(inputData.getLong(KEY_CHAPTER_ID, -1)) ?: return Result.success()
         val count = inputData.getInt(KEY_COUNT, 5)
+        // The window is the next `count` chapter POSITIONS; chapters already cached count toward it, so reopening the
+        // same chapter never walks further into the novel. (Fresh tail placeholders created along the way are
+        // found because the successor is looked up after every step.)
         var cursor = start
-        var fetched = 0
-        while (fetched < count) {
-            val target = chapters.nextUnfetched(cursor) ?: break
-            when (val outcome = fetcher.ensureFetched(target.id)) {
-                is FetchOutcome.Success -> cursor = outcome.chapter
-                // Locked/failed chapter: stop here, the chain beyond it is unknown or inaccessible.
-                is FetchOutcome.Locked, is FetchOutcome.Failed, is FetchOutcome.NeedsBrowser -> return Result.success()
+        var position = 0
+        while (position < count) {
+            val next = chapters.next(cursor) ?: break
+            if (next.status == ChapterStatus.LOCKED || next.status == ChapterStatus.FAILED) break // chain blocked here
+            if (next.status != ChapterStatus.FETCHED || chapters.getText(next.id) == null) {
+                when (val outcome = fetcher.ensureFetched(next.id)) {
+                    is FetchOutcome.Success -> cursor = outcome.chapter
+                    // Locked/failed chapter: stop here, the chain beyond it is unknown or inaccessible.
+                    is FetchOutcome.Locked, is FetchOutcome.Failed, is FetchOutcome.NeedsBrowser -> return Result.success()
+                }
+            } else {
+                cursor = next
             }
-            fetched++
+            position++
         }
         return Result.success()
     }

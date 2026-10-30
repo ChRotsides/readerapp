@@ -101,6 +101,10 @@ interface ChapterDao {
     @Query("SELECT * FROM chapters WHERE novelId = :novelId")
     suspend fun all(novelId: Long): List<Chapter>
 
+    /** Makes room: moves every chapter of the novel at or after [from] [by] places back. (Index is not unique.) */
+    @Query("UPDATE chapters SET chapterIndex = chapterIndex + :by WHERE novelId = :novelId AND chapterIndex >= :from")
+    suspend fun shiftFrom(novelId: Long, from: Int, by: Int)
+
     @Query("UPDATE chapters SET chapterIndex = :index, title = :title WHERE id = :id")
     suspend fun setIndexAndTitle(id: Long, index: Int, title: String)
 

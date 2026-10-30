@@ -23,7 +23,7 @@ class HaikuVerifier @Inject constructor(
     private data class Answer(val verdict: String, val probability: Double)
 
     override suspend fun verify(input: VerificationInput): VerdictResult {
-        if (spend.capReached()) throw VerifierUnavailableException("Monthly AI spend cap reached")
+        if (spend.capReached()) throw VerifierUnavailableException("Monthly AI spend cap reached", spendCap = true)
         val response = try {
             llm.complete(
                 LlmRequest(
@@ -39,7 +39,7 @@ class HaikuVerifier @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: LlmException) {
-            throw VerifierUnavailableException(e.message ?: "Haiku verifier failed", e)
+            throw VerifierUnavailableException(e.message ?: "Haiku verifier failed", e, spendCap = e is LlmException.SpendCapReached)
         }
         val answer = try {
             Json { ignoreUnknownKeys = true }.decodeFromString(Answer.serializer(), response.text)

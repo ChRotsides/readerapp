@@ -9,12 +9,12 @@ import com.readerapp.scrape.TextCleaner
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import com.google.re2j.Pattern
 
 data class TocPage(val refs: List<ChapterRef>, val nextPageUrl: String?)
 
 /** Executes a [JsonAdapterSpec] with Jsoup. Output paragraphs go through [TextCleaner]. */
 object JsonAdapterRunner {
-    private const val REGEX_BUDGET_MS = 500L
 
     fun run(spec: JsonAdapterSpec, page: FetchedPage, extractorName: String): ExtractionResult {
         val doc = Jsoup.parse(page.html, page.url)
@@ -53,7 +53,7 @@ object JsonAdapterRunner {
         val toc = spec.toc ?: return info to TocPage(emptyList(), null)
         val refs = runCatching { doc.select(toc.items) }.getOrDefault(org.jsoup.select.Elements())
             .mapNotNull { a ->
-                val href = a.absUrl("href").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val href = AdapterUrls.sameSite(a.absUrl("href"), page.url) ?: return@mapNotNull null
                 ChapterRef(a.text().trim().takeIf { it.isNotEmpty() }, href)
             }
             .distinctBy { it.url }
@@ -83,32 +83,17 @@ object JsonAdapterRunner {
         val el: Element = runCatching { doc.selectFirst(selector) }.getOrNull() ?: return null
         val a = if (el.tagName() == "a") el else el.selectFirst("a[href]") ?: el.closest("a[href]") ?: return null
         val url = a.absUrl("href")
-        return url.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+        return AdapterUrls.sameSite(url, doc.location())
     }
 
-    /** Applies LLM-written regexes with a time limit so a pathological pattern cannot hang the app. */
+    /**
+     * Applies LLM-written regexes with RE2/J, whose matching time is linear in the input, so no pattern
+     * (e.g. `(a+)+$`) can hang the app. Patterns RE2 cannot express (lookaround, backreferences) are ignored here;
+     * [JsonAdapterSpec.validate] rejects them up front.
+     */
     internal fun dropLines(paragraphs: List<String>, patterns: List<String>): List<String> {
         if (patterns.isEmpty()) return paragraphs
-        val regexes = patterns.mapNotNull { runCatching { Regex(it) }.getOrNull() }
-        val deadline = System.currentTimeMillis() + REGEX_BUDGET_MS * (paragraphs.size.coerceAtLeast(1)).coerceAtMost(40)
-        return paragraphs.filter { p ->
-            val seq = DeadlineCharSequence(p, deadline)
-            regexes.none { r -> runCatching { r.containsMatchIn(seq) }.getOrDefault(false) }
-        }
+        val regexes = patterns.mapNotNull { runCatching { Pattern.compile(it) }.getOrNull() }
+        return paragraphs.filter { p -> regexes.none { r -> r.matcher(p).find() } }
     }
-}
-
-/** CharSequence that throws once [deadlineMs] has passed, aborting catastrophic regex backtracking. */
-internal class DeadlineCharSequence(private val inner: CharSequence, private val deadlineMs: Long) : CharSequence {
-    private var counter = 0
-    override val length get() = inner.length
-    override fun get(index: Int): Char {
-        if ((++counter and 0xFFFF) == 0 && System.currentTimeMillis() > deadlineMs) {
-            throw IllegalStateException("regex time limit exceeded")
-        }
-        return inner[index]
-    }
-    override fun subSequence(startIndex: Int, endIndex: Int): CharSequence =
-        DeadlineCharSequence(inner.subSequence(startIndex, endIndex), deadlineMs)
-    override fun toString() = inner.toString()
 }

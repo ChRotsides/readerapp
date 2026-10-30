@@ -40,13 +40,10 @@ class AdaptersViewModel @Inject constructor(
 
     fun regenerate(domain: String) = scheduler.scheduleRegenerate(domain)
 
-    /** Makes [version] the active one; any other ACTIVE version is retired (kept, never deleted). */
+    /** Makes [version] the active one; any other ACTIVE version is retired (kept, never deleted). Atomic. */
     fun activate(domain: String, version: Int) {
         viewModelScope.launch {
-            repo.versions(domain).filter { it.status == AdapterStatus.ACTIVE && it.version != version }
-                .forEach { repo.setStatus(domain, it.version, AdapterStatus.RETIRED) }
-            repo.get(domain, version)?.let { repo.resetFailures(it) }
-            repo.setStatus(domain, version, AdapterStatus.ACTIVE)
+            repo.activateExclusive(domain, version)
             repo.domainState(domain)?.let { repo.saveDomainState(it.copy(genericFallback = false)) }
         }
     }

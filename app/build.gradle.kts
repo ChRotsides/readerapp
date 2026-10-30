@@ -82,6 +82,8 @@ dependencies {
 
     implementation(libs.okhttp)
     implementation(libs.jsoup)
+    implementation(libs.re2j)
+    implementation(libs.androidx.webkit)
     implementation(libs.readability4j)
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)

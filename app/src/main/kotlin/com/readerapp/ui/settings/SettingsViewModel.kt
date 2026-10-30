@@ -11,7 +11,9 @@ import com.readerapp.data.settings.SecureSettings
 import com.readerapp.data.settings.Secrets
 import com.readerapp.data.settings.ThemeMode
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -23,6 +25,7 @@ class SettingsViewModel @Inject constructor(
     private val prefsRepo: ReaderPrefsRepository,
     private val aiSettings: AiSettings,
     usage: UsageRepository,
+    private val resume: com.readerapp.ai.resume.SpendResumeScheduler,
 ) : ViewModel() {
     val monthlyCapUsd: StateFlow<Double> = aiSettings.monthlyCapUsd
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AiSettings.DEFAULT_CAP_USD)
@@ -45,7 +48,11 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun setMonthlyCap(usd: Double) {
-        viewModelScope.launch { aiSettings.setMonthlyCapUsd(usd) }
+        viewModelScope.launch {
+            aiSettings.setMonthlyCapUsd(usd)
+            // A higher cap may let paused adapter / processing work continue now.
+            resume.resumeNow()
+        }
     }
 
     val secrets: StateFlow<Secrets> = secure.secrets
@@ -54,8 +61,15 @@ class SettingsViewModel @Inject constructor(
     val prefs: StateFlow<ReaderPrefs> = prefsRepo.prefs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ReaderPrefs())
 
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error.asStateFlow()
+
+    fun errorShown() { _error.value = null }
+
     fun saveSecret(name: SecretKeyName, value: String) {
-        viewModelScope.launch { secure.set(name, value) }
+        viewModelScope.launch {
+            _error.value = if (secure.set(name, value)) null else "That is not a valid http(s) URL, so it was not saved."
+        }
     }
 
     fun clearSecret(name: SecretKeyName) {

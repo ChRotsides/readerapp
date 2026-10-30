@@ -13,6 +13,8 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.readerapp.ai.LlmException
 import com.readerapp.ai.SpendGuard
+import com.readerapp.ai.resume.DeferredJob
+import com.readerapp.ai.resume.SpendResumer
 import com.readerapp.ai.summary.SummaryService
 import com.readerapp.data.db.AutoProcessMode
 import com.readerapp.data.db.ChapterStatus
@@ -33,7 +35,7 @@ import javax.inject.Singleton
 /**
  * Background queue for one novel: from the chapter the reader is on, processes it and the next N chapters in order
  * (fix or translate, per the novel's setting), fetching them first when needed, then writes their summaries.
- * Stops quietly when the spend cap is reached or there is no API key; retries on transient API errors.
+ * When the spend cap is reached it stops and is deferred (resumes automatically next month or when the cap is raised); stops quietly without an API key; retries on transient API errors.
  */
 @HiltWorker
 class ProcessWorker @AssistedInject constructor(
@@ -46,6 +48,7 @@ class ProcessWorker @AssistedInject constructor(
     private val summaries: SummaryService,
     private val settings: AiSettings,
     private val spend: SpendGuard,
+    private val resumer: SpendResumer,
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
@@ -54,15 +57,22 @@ class ProcessWorker @AssistedInject constructor(
         if (novel.autoProcess == AutoProcessMode.OFF) return Result.success()
         val variant = if (novel.autoProcess == AutoProcessMode.TRANSLATE) TextVariant.TRANSLATED else TextVariant.FIXED
 
+        // Paused by the spend cap: remembered durably and re-queued when the month rolls over or the cap is raised.
+        suspend fun pausedByCap(): Result {
+            resumer.defer(DeferredJob.Process(novel.id, anchor.id))
+            return Result.success()
+        }
+
         val window = listOf(anchor) + chapters.nextN(anchor, settings.currentProcessAhead())
         for (chapter in window) {
-            if (spend.capReached()) return Result.success()
+            if (spend.capReached()) return pausedByCap()
             if (chapter.status != ChapterStatus.FETCHED || chapters.getText(chapter.id) == null) {
                 if (fetcher.ensureFetched(chapter.id) !is FetchOutcome.Success) break // the chain beyond is unknown/locked
             }
             when (val outcome = processor.process(chapter.id, variant)) {
                 is ProcessOutcome.Retry -> return Result.retry()
-                ProcessOutcome.CapReached, ProcessOutcome.NoApiKey -> return Result.success()
+                ProcessOutcome.CapReached -> return pausedByCap()
+                ProcessOutcome.NoApiKey -> return Result.success()
                 // Not needed / failed / done / already done: summaries are still useful, carry on.
                 else -> Unit
             }
@@ -73,7 +83,7 @@ class ProcessWorker @AssistedInject constructor(
             } catch (e: LlmException.Retryable) {
                 return Result.retry()
             } catch (e: LlmException.SpendCapReached) {
-                return Result.success()
+                return pausedByCap()
             } catch (e: LlmException.NotConfigured) {
                 return Result.success()
             } catch (e: LlmException) {

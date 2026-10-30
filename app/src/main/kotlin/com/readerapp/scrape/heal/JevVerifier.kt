@@ -1,6 +1,7 @@
 package com.readerapp.scrape.heal
 
 import com.readerapp.data.settings.SecureSettings
+import com.readerapp.data.settings.normalizeBaseUrl
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -45,7 +46,7 @@ object JevApi {
     )
 
     fun url(baseUrl: String?): String {
-        val base = (baseUrl?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_BASE_URL).trimEnd('/')
+        val base = (baseUrl?.let { normalizeBaseUrl(it) } ?: DEFAULT_BASE_URL).trimEnd('/')
         return if (base.endsWith(PATH)) base else base + PATH
     }
 
@@ -99,12 +100,14 @@ class JevVerifier @Inject constructor(private val settings: SecureSettings) : Ex
     override suspend fun verify(input: VerificationInput): VerdictResult {
         val secrets = settings.current()
         val key = secrets.jevApiKey?.takeIf { it.isNotBlank() } ?: throw VerifierUnavailableException("Jev API key not set")
-        val request = Request.Builder()
-            .url(JevApi.url(secrets.jevBaseUrl))
-            .header("Authorization", "Bearer $key")
-            .post(JevApi.requestBody(VerifierText.render(input)).toRequestBody("application/json".toMediaType()))
-            .build()
         try {
+            // Built inside the translation boundary: a malformed stored endpoint must mean "unavailable" (Haiku takes
+            // over), never an IllegalArgumentException escaping into the reader.
+            val request = Request.Builder()
+                .url(JevApi.url(secrets.jevBaseUrl))
+                .header("Authorization", "Bearer $key")
+                .post(JevApi.requestBody(VerifierText.render(input)).toRequestBody("application/json".toMediaType()))
+                .build()
             return withTimeout(20_000) {
                 withContext(Dispatchers.IO) {
                     http.newCall(request).execute().use { response ->
