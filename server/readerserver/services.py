@@ -17,6 +17,15 @@ from .sources.mal import MalSource
 from .sources.mangaupdates import MangaUpdatesSource
 from .sources.syosetu import SyosetuSource
 
+# Per-source host allowlists (SSRF guard): a source may only fetch its own site (incl. subdomains) plus its API hosts.
+SOURCE_HOSTS: dict[str, tuple[str, ...]] = {
+    "syosetu": ("syosetu.com",), "anilist": ("anilist.co",), "mangaupdates": ("mangaupdates.com",),
+    "mal": ("myanimelist.net",), "webnovel": ("webnovel.com",), "novelupdates": ("novelupdates.com",),
+    "kakuyomu": ("kakuyomu.jp",), "royalroad": ("royalroad.com",), "scribblehub": ("scribblehub.com",),
+    "wuxiaworld": ("wuxiaworld.com",), "tapas": ("tapas.io",), "alphapolis": ("alphapolis.co.jp",),
+    "munpia": ("munpia.com",),
+}
+
 # HTML-site sources (5b): name -> factory(settings) -> Source, filled by sources.html_registry.register()
 HTML_SOURCES: dict = {}
 API_SOURCES = ["syosetu", "anilist", "mangaupdates", "mal"]
@@ -56,6 +65,16 @@ def source_names() -> list[str]:
 
 
 def build_source(name: str, settings: Settings) -> Source:
+    source = _build_source(name, settings)
+    hosts = SOURCE_HOSTS[name]
+    for attr in ("http", "html_http"):
+        http = getattr(source, attr, None)
+        if http is not None:
+            http.allowed_hosts = set(hosts)
+    return source
+
+
+def _build_source(name: str, settings: Settings) -> Source:
     def client(delay: float | None, robots: bool) -> PoliteClient:
         return PoliteClient(settings.user_agent, min_delay=max(settings.crawl_min_delay_seconds, delay or 0.0), respect_robots=robots)
 

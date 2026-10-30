@@ -48,7 +48,7 @@ def test_mangaupdates_parse():
     assert rec.rating_scale == 10.0 and rec.rating_votes == 4 and rec.start_year == 2020
     assert rec.authors == ["Wooden Horse"]
     ids = rec.external_ids
-    assert ids["mangaupdates"] == "73074336025"
+    assert ids == {"mangaupdates": "73074336025"}  # description-linked ids are never identity ids
     assert any("munpia" in u for u in rec.related_urls)  # sibling-site links kept for hard matching
     assert "Original Novel" not in (rec.synopsis or "")
 

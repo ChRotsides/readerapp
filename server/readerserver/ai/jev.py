@@ -56,25 +56,25 @@ class JevClient:
         return bool(self.settings.jev_api_key)
 
     async def ask(self, a: dict, b: dict) -> MatchVerdict:
-        await self.spend.check()
-        resp = await self.http.post(
-            f"{self.settings.jev_base_url.rstrip('/')}/v1/systemone",
-            headers={"Authorization": f"Bearer {self.settings.jev_api_key}"},
-            json={
-                "model": self.settings.jev_model,
-                "state": {"record_a": a, "record_b": b},
-                "questions": {"match": {"type": "choice", "instructions": INSTRUCTIONS, "criteria": CRITERIA}},
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        ans = data["answers"]["match"]
-        probs = {k: float(v) for k, v in (ans.get("probabilities") or {}).items()}
-        choice = ans["choice"]
-        usage = data.get("usage") or {}
-        await self.spend.record("jev", data.get("model", self.settings.jev_model), "verdict",
-                                int(usage.get("input_tokens", 0)), int(usage.get("output_tokens", 0)),
-                                self.settings.jev_price_per_call)
+        async with self.spend.reserve(self.settings.jev_price_per_call, "verdict") as reservation:
+            resp = await self.http.post(
+                f"{self.settings.jev_base_url.rstrip('/')}/v1/systemone",
+                headers={"Authorization": f"Bearer {self.settings.jev_api_key}"},
+                json={
+                    "model": self.settings.jev_model,
+                    "state": {"record_a": a, "record_b": b},
+                    "questions": {"match": {"type": "choice", "instructions": INSTRUCTIONS, "criteria": CRITERIA}},
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            ans = data["answers"]["match"]
+            probs = {k: float(v) for k, v in (ans.get("probabilities") or {}).items()}
+            choice = ans["choice"]
+            usage = data.get("usage") or {}
+            await reservation.settle("jev", data.get("model", self.settings.jev_model), "verdict",
+                                     int(usage.get("input_tokens", 0)), int(usage.get("output_tokens", 0)),
+                                     self.settings.jev_price_per_call)
         return MatchVerdict(choice, probs.get(choice, float(ans.get("confidence", 0))), "jev", probs)
 
 

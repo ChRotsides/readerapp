@@ -138,6 +138,29 @@ async def test_wuxiaworld_catalog_version_skip_and_samples():
         wuxiaworld.parse_novel(fx("wuxiaworld_novel_paid.html")), 3) == []
 
 
+async def test_wuxiaworld_paid_or_unknown_never_requests_a_chapter_page():
+    urls: list[str] = []
+    h = router(ROUTES_WW, urls)
+    paid = wuxiaworld.parse_novel(fx("wuxiaworld_novel_paid.html"))
+    urls.clear()
+    assert await wuxiaworld.WuxiaworldSource(client(h)).fetch_sample_chapters(paid, 3) == []
+    assert not any("chapter" in u for u in urls), urls  # novel page only: status came from metadata
+
+    # status cannot be established (no pricingInfo on the first chapter, novel not free) -> skip, no chapter request
+    st = wuxiaworld.query_state(fx("wuxiaworld_novel_paid.html"))
+    for q in st["queries"]:
+        if q["queryKey"][0] == "novel":
+            q["state"]["data"]["item"]["chapterInfo"]["firstChapter"].pop("pricingInfo", None)
+    html = "<script>window.__REACT_QUERY_STATE__ = " + json.dumps(st) + ";</script>"
+    routes = dict(ROUTES_WW)
+    unknown = lambda r: httpx.Response(200, text=html) if r.url.path == "/novel/coiling-dragon" else router(routes, urls)(r)
+    urls.clear()
+    assert await wuxiaworld.WuxiaworldSource(client(unknown)).fetch_sample_chapters(paid, 3) == []
+    assert not any("chapter" in u for u in urls)
+    assert wuxiaworld.chapter_listed_free({"pricingInfo": {"isFree": True}}, False)
+    assert not wuxiaworld.chapter_listed_free({"pricingInfo": {"isFree": True}, "karmaInfo": {"isKarmaRequired": True}}, True)
+
+
 def test_wuxiaworld_never_free_when_karma_required():
     st = wuxiaworld.query_state(fx("wuxiaworld_chapter1.html"))
     st["queries"][0]["state"]["data"]["item"]["karmaInfo"]["isKarmaRequired"] = True
@@ -217,7 +240,8 @@ def test_novelupdates_parse():
     assert r.authors == ["Wo Chi Xihongshi", "我吃西红柿"] and r.language == "zh" and r.start_year == 2013
     assert r.tags == ["Cultivation", "Strong to Stronger"] and r.genres == ["Fantasy", "Action"]
     assert (r.rating, r.rating_scale, r.rating_votes) == (4.5, 5.0, 1234) and r.status == "ongoing" and r.chapter_count == 528
-    assert r.external_ids == {"novelupdates": "example-novel", "mal": "12345"}
+    assert r.external_ids == {"novelupdates": "example-novel"}  # description-derived MAL link is descriptive only
+    assert any("myanimelist.net/manga/12345" in u for u in r.related_urls)
     assert "https://translator.example/example-novel" in r.related_urls and "https://original.example/book/1" in r.related_urls
     assert r.raw["original_publisher"] == ["Example Publisher"] and r.synopsis.startswith("Placeholder description")
 
@@ -323,3 +347,11 @@ def test_registry_polite_defaults():
         assert src.http.respect_robots is True and src.http.min_delay >= 3.0 and "ReaderAppCrawler" in src.http.user_agent
     syo = build_source("syosetu", settings)
     assert syo.html_http.respect_robots is True and syo.html_http.min_delay >= 3.0 and syo.http.respect_robots is False
+
+
+def test_scribblehub_locked_first_chapter_link_is_skipped():
+    from readerserver.sources.htmlutil import soup
+
+    ok = soup('<a class="read_buttons" href="https://www.scribblehub.com/read/1-x/chapter/2/">Read</a>')
+    locked = soup('<a class="read_buttons" href="https://www.scribblehub.com/read/1-x/chapter/2/"><i class="fa fa-lock"></i>Read</a>')
+    assert scribblehub.first_chapter_url(ok) and scribblehub.first_chapter_url(locked) is None

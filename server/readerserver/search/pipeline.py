@@ -15,7 +15,7 @@ from ..resolution.resolver import load_tag_maps
 from ..works import load_works
 from .fusion import Fused, fuse
 from .retrieval import filter_clauses, knn_chunks, knn_profiles
-from .schemas import HydeOutput, RerankOutput, SearchFilters, SearchRequest, SearchResponse, SearchResult
+from .schemas import HydeOutput, RerankItem, RerankOutput, SearchFilters, SearchRequest, SearchResponse, SearchResult
 
 log = logging.getLogger(__name__)
 RERANK_POOL = 20
@@ -50,17 +50,17 @@ class SearchService:
     async def search(self, session: AsyncSession, req: SearchRequest) -> SearchResponse:
         notes: list[str] = []
         scenes, synopsis, tags, filters = req.scenes, req.synopsis, req.tags, req.filters
-        if not scenes or not synopsis or filters is None:
+        supplied = bool([x for x in (scenes or []) if x.strip()]) and bool(synopsis)
+        if not supplied:  # supplied scenes + synopsis = caller-provided hypotheticals: no HyDE call, default filters
             try:
+                if self.llm is None:
+                    raise LLMError("Claude is not configured")
                 h = await self.generate_hyde(req.description)
             except BudgetExceeded as e:
-                if not (scenes or synopsis):
-                    raise BudgetError(str(e)) from e
+                notes.append(f"monthly AI budget reached: hypothetical generation skipped ({e})")
                 h = None
-            except LLMError as e:
-                if not (scenes or synopsis):
-                    raise
-                notes.append(f"hypothetical generation failed: {e}")
+            except LLMError as e:  # incl. translated provider errors (network, rate limit, 5xx)
+                notes.append(f"hypothetical generation unavailable ({e}); using the description for retrieval only")
                 h = None
             if h is not None:
                 scenes = scenes or h.scenes[:3]
@@ -97,20 +97,32 @@ class SearchService:
         reasons: dict[str, str] = {}
         order = [f.work_id for f in pool]
         reranked = False
-        try:
-            rr = await self._rerank(req.description, scenes, [details[uuid.UUID(f.work_id)] for f in pool if uuid.UUID(f.work_id) in details])
-            valid = [i for i in rr.ranking if i.work_id in order]
-            if valid:
-                reasons = {i.work_id: i.reason for i in valid}
-                ranked_ids = [i.work_id for i in valid]
-                order = ranked_ids + [w for w in order if w not in ranked_ids]
-                reranked = True
-        except BudgetExceeded:
-            notes.append("monthly AI budget reached: showing retrieval order without rerank")
-        except LLMError as e:
-            notes.append(f"rerank unavailable ({e}); showing retrieval order")
+        cands = [details[uuid.UUID(f.work_id)] for f in pool if uuid.UUID(f.work_id) in details]
+        if self.llm is None:
+            notes.append("rerank unavailable (Claude is not configured); showing retrieval order")
+        else:
+            try:
+                rr = await self._rerank(req.description, scenes, cands)
+                in_pool = set(order)
+                valid: list[RerankItem] = []
+                seen: set[str] = set()
+                for i in rr.ranking:
+                    if i.work_id in in_pool and i.work_id not in seen:
+                        seen.add(i.work_id)
+                        valid.append(i)
+                if rr.ranking and not valid:
+                    notes.append("rerank returned no usable ids; showing retrieval order")
+                else:
+                    # A successful verdict is respected, including an empty or partial list (omitted = dropped).
+                    reasons = {i.work_id: i.reason for i in valid}
+                    order = [i.work_id for i in valid]
+                    reranked = True
+            except BudgetExceeded:
+                notes.append("monthly AI budget reached: showing retrieval order without rerank")
+            except LLMError as e:
+                notes.append(f"rerank unavailable ({e}); showing retrieval order")
 
-        top = max(f.score for f in pool) or 1.0
+        top = max((f.score for f in pool), default=1.0) or 1.0
         by_id: dict[str, Fused] = {f.work_id: f for f in pool}
         results = []
         for wid in order[: req.limit]:

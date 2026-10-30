@@ -6,7 +6,8 @@ structured novel record (genres, tags, translator, synopsis, status, chapter cou
 `['chapter', slug, chapterSlug, ...]` on a chapter page holds the chapter body. Verified live (Oct 2026).
 
 Free chapters: only chapters whose own `pricingInfo.isFree` is true, or every chapter when the novel's active pricing
-model is `free`; never when `karmaInfo.isKarmaRequired`. Fetching stops at the first chapter that is not free."""
+model is `free`; never when `karmaInfo.isKarmaRequired`. Free status is decided from the novel page's metadata
+(`chapterInfo.firstChapter`) before any chapter page is requested; without that proof nothing is fetched."""
 import json
 import re
 from datetime import UTC, datetime
@@ -60,6 +61,15 @@ def alt_names(description_html: str | None) -> list[str]:
 def free_pricing(item: dict[str, Any]) -> bool:
     series = item.get("series") or {}
     return ((series.get("pricingModel") or {}).get("pricing") or {}).get("oneofKind") == "free"
+
+
+def chapter_listed_free(chapter: dict[str, Any], novel_free: bool) -> bool:
+    """Free from metadata alone (novel-level or chapter-level pricing info), never when karma is required."""
+    if (chapter.get("karmaInfo") or {}).get("isKarmaRequired"):
+        return False
+    if novel_free:
+        return True
+    return (chapter.get("pricingInfo") or {}).get("isFree") is True
 
 
 def parse_novel(html: str, lastmod: str = "") -> SourceRecordData | None:
@@ -153,7 +163,11 @@ class WuxiaworldSource(Source):
         if not item:
             return []
         free_all = free_pricing(item)
-        chapter = (((item.get("chapterInfo") or {}).get("firstChapter")) or {}).get("slug")
+        first = ((item.get("chapterInfo") or {}).get("firstChapter")) or {}
+        chapter = first.get("slug")
+        # Free access must be established from catalog metadata BEFORE any chapter page is requested.
+        if not chapter or not chapter_listed_free(first, free_all):
+            return []
         out: list[str] = []
         while chapter and len(out) < min(n, 3):
             page = await get_html(self.http, f"{BASE}/novel/{slug}/{chapter}")
@@ -161,4 +175,6 @@ class WuxiaworldSource(Source):
             if not text:
                 break
             out.append(text)
+            if not free_all:
+                break  # only chapter 1 is vouched for by metadata; later chapters' status is unknown
         return out

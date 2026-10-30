@@ -134,3 +134,86 @@ async def test_jev_unsure_or_down_falls_back_to_claude(spend, fake_llm):
     # no Jev key configured -> Claude directly
     v = await CompositeVerdict(Settings(), None, fake_llm).verdict({}, {})
     assert v.method == "claude"
+
+
+# ---------------------------------------------------------------- review-3 #15 / #16 / #20
+async def test_concurrent_reservations_cannot_overshoot_cap(maker):
+    import asyncio
+
+    sp = SpendTracker(maker, 1.0)
+
+    async def one():
+        try:
+            async with sp.reserve(0.6, "t") as r:
+                await asyncio.sleep(0.2)  # in-flight while the other tries
+                await r.settle("anthropic", "m", "t", 1, 1, 0.5)
+            return "ok"
+        except BudgetExceeded:
+            return "denied"
+
+    results = await asyncio.gather(one(), one(), one())
+    assert sorted(results) == ["denied", "denied", "ok"]
+    assert (await sp.summary())["spent_usd"] == 0.5
+
+
+async def test_reservation_released_on_failure_and_held_while_in_flight(maker):
+    sp = SpendTracker(maker, 1.0)
+    with pytest.raises(RuntimeError):
+        async with sp.reserve(0.9, "t"):
+            with pytest.raises(BudgetExceeded):
+                async with sp.reserve(0.2, "t"):
+                    pass
+            raise RuntimeError("call failed")
+    async with sp.reserve(0.9, "t") as r:  # budget came back
+        await r.settle("anthropic", "m", "t", 1, 1, 0.1)
+    assert (await sp.summary())["spent_usd"] == 0.1
+
+
+async def test_expired_reservations_do_not_hold_budget(maker):
+    from datetime import UTC, datetime, timedelta
+
+    from readerserver.models import SpendReservation
+
+    sp = SpendTracker(maker, 1.0)
+    async with maker() as s:
+        s.add(SpendReservation(amount_usd=1.0, expires_at=datetime.now(UTC) - timedelta(minutes=1)))
+        await s.commit()
+    async with sp.reserve(0.5, "t"):
+        pass
+
+
+async def test_fallback_iterations_billed_per_attempt_model_with_cache_tokens(spend):
+    usage = NS(input_tokens=300, output_tokens=200, iterations=[
+        {"type": "message", "model": "claude-sonnet-5-5", "input_tokens": 1000, "output_tokens": 0},
+        {"type": "fallback_message", "model": "claude-haiku-5-5", "input_tokens": 100, "output_tokens": 200,
+         "cache_creation_input_tokens": 400, "cache_read_input_tokens": 1000},
+    ])
+    r = NS(parsed_output=RerankOutput(ranking=[]), stop_reason="end_turn", stop_details=None, usage=usage, model="claude-haiku-5-5")
+    llm = ClaudeLLM(Settings(), spend, client=anthropic_fake(r))
+    await llm.parse(model="claude-sonnet-5-5", system="s", user="u", schema=RerankOutput, effort="low", max_tokens=100, purpose="rerank")
+    # sonnet: 1000 in @2/M; haiku: (100 + 400*1.25 + 1000*0.1)=700 in @0.1/M + 200 out @0.5/M
+    expected = 1000 * 2.0 / 1e6 + (700 * 0.10 + 200 * 0.50) / 1e6
+    assert (await spend.summary())["spent_usd"] == pytest.approx(expected, abs=1e-4)
+
+
+async def test_without_iterations_actual_serving_model_is_priced(spend):
+    usage = NS(input_tokens=1_000_000, output_tokens=0)
+    r = NS(parsed_output=RerankOutput(ranking=[]), stop_reason="end_turn", stop_details=None, usage=usage, model="claude-haiku-5-5")
+    llm = ClaudeLLM(Settings(), spend, client=anthropic_fake(r))
+    await llm.parse(model="claude-sonnet-5-5", system="s", user="u", schema=RerankOutput, effort="low", max_tokens=100, purpose="rerank")
+    assert (await spend.summary())["spent_usd"] == pytest.approx(0.10, abs=1e-4)  # not the $2.00 sonnet price
+
+
+async def test_sdk_errors_become_llm_error_and_release_reservation(spend):
+    from readerserver.ai.llm import LLMError
+
+    class Boom:
+        async def parse(self, **kw):
+            raise ConnectionError("network down")
+
+    client = NS(messages=Boom(), beta=NS(messages=Boom()))
+    llm = ClaudeLLM(Settings(), spend, client=client)
+    for model in ("claude-haiku-5-5", "claude-sonnet-5-5"):
+        with pytest.raises(LLMError):
+            await llm.parse(model=model, system="s", user="u", schema=RerankOutput, effort="low", max_tokens=100, purpose="x")
+    assert await spend._held() == 0

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     crawl_min_delay_seconds: float = 3.0
     crawl_interval_hours: float = 24.0
     sample_chapters: int = 3
+    crawl_lease_seconds: float = 900.0  # a running crawl renews this lease; an expired one is resumed from its checkpoint
     enabled_sources: str = ""  # scheduled crawling is opt-in: ENABLED_SOURCES=syosetu,anilist,mangaupdates,mal
 
     @property

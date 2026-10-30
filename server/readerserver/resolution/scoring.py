@@ -3,6 +3,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Literal
 
+from ..sources.util import extract_links
 from ..text import authors_match, best_title_similarity, normalize_title, version_marker
 
 W_TITLE, W_AUTHOR, W_SYNOPSIS, W_LANG, W_YEAR, W_CHAPTERS = 0.40, 0.20, 0.22, 0.06, 0.06, 0.06
@@ -67,6 +68,9 @@ def score_pair(a, b, synopsis_cos: float | None = None) -> Score:
     total = sum(w * s for w, s in parts) / sum(w for w, _ in parts)
 
     notes: list[str] = []
+    if cross_linked(a, b):  # descriptive link (description/related URL): evidence, never identity
+        total = min(1.0, total + 0.10)
+        notes.append("description cross-link")
     if lang is False:
         total *= 0.7
         notes.append("original language differs")
@@ -102,20 +106,33 @@ def distinctive(norm: str) -> bool:
     return len(norm.replace(" ", "")) >= (4 if has_cjk else 8)
 
 
-def hard_match(a, b) -> tuple[str, dict] | None:
-    """Step 1: cross-source ids, URL cross-references, exact (distinctive) alias equality."""
-    ida, idb = a.external_ids or {}, b.external_ids or {}
-    for k in ida.keys() & idb.keys():
-        if ida[k] == idb[k]:
-            return "hard_id", {"id": k, "value": ida[k]}
+def cross_linked(a, b) -> bool:
+    """True when either record's descriptive links (related URLs / ids found in descriptions) point at the other.
+    Such links also cover sequels, adaptations and LN/WN siblings, so they are only scoring evidence."""
     a_rel = {_norm_url(u) for u in (a.related_urls or [])}
     b_rel = {_norm_url(u) for u in (b.related_urls or [])}
     if (b.url and _norm_url(b.url) in a_rel) or (a.url and _norm_url(a.url) in b_rel):
-        return "hard_id", {"url_crossref": True}
+        return True
+    for x, y in ((a, b), (b, a)):
+        linked_ids, _ = extract_links(" ".join(x.related_urls or []))
+        yid = y.external_ids or {}
+        if any(yid.get(k) == v for k, v in linked_ids.items()):
+            return True
+    return False
+
+
+def hard_match(a, b) -> tuple[str, dict] | None:
+    """Step 1: AUTHORITATIVE cross-source ids (a source's own id, AniList's idMal) and exact distinctive alias equality.
+    Descriptive links never match here (see `cross_linked`); WN-vs-LN/version-marker conflicts never auto-merge."""
+    ma, mb = version_marker(a.title), version_marker(b.title)
+    version_conflict = bool(ma and mb and ma != mb)
+    ida, idb = a.external_ids or {}, b.external_ids or {}
+    for k in ida.keys() & idb.keys():
+        if ida[k] == idb[k] and not version_conflict:
+            return "hard_id", {"id": k, "value": ida[k]}
     if a.source == b.source:
         return None
-    ma, mb = version_marker(a.title), version_marker(b.title)
-    if ma and mb and ma != mb:
+    if version_conflict:
         return None  # WN vs LN of the same title: related, not identical -> goes through the typed verdict
     na = {normalize_title(t) for t in all_titles(a)}
     nb = {normalize_title(t) for t in all_titles(b)}

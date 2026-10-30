@@ -64,6 +64,8 @@ def parse_series_page(html: str, stub: SourceRecordData) -> SourceRecordData | N
 
 def first_chapter_url(doc) -> str | None:
     a = doc.select_one("a.read_buttons[href*='/chapter/'], a.btn-first[href*='/chapter/']") or doc.find("a", href=re.compile(r"/read/\d+-[^/]+/chapter/\d+/?$"))
+    if a is not None and (a.select_one("[class*='lock'], .fa-lock") or "lock" in " ".join(a.get("class", []))):
+        return None  # marked locked/premium in the series page's own metadata: never request it
     return a["href"] if a else None
 
 

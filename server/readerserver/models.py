@@ -4,6 +4,7 @@ from datetime import datetime
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     Boolean,
     DateTime,
     Float,
@@ -86,6 +87,10 @@ class SourceRecord(Base):
     content_hash: Mapped[str | None] = mapped_column(String(64))
     synopsis_embedding = mapped_column(Vector(DIM), nullable=True)  # used for ER kNN
     needs_resolution: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    # Deferred resolution (prerequisite missing, e.g. synopsis embedding / verdict provider down): stays pending, retried later.
+    resolve_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolve_reason: Mapped[str | None] = mapped_column(String(20))  # awaiting_embedding | pending_verdict
+    resolve_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     needs_index: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     samples_done: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     crawled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
@@ -144,6 +149,18 @@ class LinkBlock(Base):
     source_record_id: Mapped[int] = mapped_column(ForeignKey("source_records.id", ondelete="CASCADE"), primary_key=True)
     work_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+
+
+class LinkSeparation(Base):
+    """Symmetric 'do not merge' constraint between two source records (created when one is split out of the other's
+    work). Stored once per unordered pair (record_a_id < record_b_id) and enforced in both directions."""
+
+    __tablename__ = "link_separations"
+    record_a_id: Mapped[int] = mapped_column(ForeignKey("source_records.id", ondelete="CASCADE"), primary_key=True)
+    record_b_id: Mapped[int] = mapped_column(ForeignKey("source_records.id", ondelete="CASCADE"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+    __table_args__ = (CheckConstraint("record_a_id < record_b_id", name="ck_link_separation_order"),
+                      Index("ix_link_separations_b", "record_b_id"))
 
 
 class WorkRelation(Base):
@@ -221,6 +238,8 @@ class CrawlState(Base):
     last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+    next_eligible_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # crawl deferred (Retry-After) until
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # heartbeat lease while running
     blocked_reason: Mapped[str | None] = mapped_column(Text)
     items_seen: Mapped[int] = mapped_column(Integer, default=0)
 
@@ -246,3 +265,14 @@ class AiUsage(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), default=0)
     __table_args__ = (Index("ix_ai_usage_ts", "ts"),)
+
+
+class SpendReservation(Base):
+    """Budget held for an in-flight paid call; replaced by its ai_usage row on settle, deleted on release/expiry."""
+
+    __tablename__ = "ai_spend_reservations"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    amount_usd: Mapped[float] = mapped_column(Numeric(12, 6), default=0)
+    purpose: Mapped[str] = mapped_column(String(40), default="")

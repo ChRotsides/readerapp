@@ -20,10 +20,28 @@ def test_hard_match_cross_ids():
     assert hard_match(a, rec(source="mal", external_ids={"mal": "121"})) is None
 
 
-def test_hard_match_url_crossref():
-    a = rec(source="mangaupdates", related_urls=["https://novel.munpia.com/222360"])
-    b = rec(source="munpia", url="http://novel.munpia.com/222360/")
-    assert hard_match(a, b)[1] == {"url_crossref": True}
+def test_descriptive_url_crossref_is_not_a_hard_match_but_scores():
+    from readerserver.resolution.scoring import cross_linked, score_pair
+
+    a = rec(source="mangaupdates", title="Alpha Saga", related_urls=["https://novel.munpia.com/222360"])
+    b = rec(source="munpia", title="Alpha Sagas", url="http://novel.munpia.com/222360/")
+    assert hard_match(a, b) is None and cross_linked(a, b) and cross_linked(b, a)
+    plain = rec(source="munpia", title="Alpha Sagas", url="http://novel.munpia.com/999/")
+    assert score_pair(a, b).total > score_pair(a, plain).total  # evidence only
+
+
+def test_descriptive_mal_link_in_related_urls_is_not_identity():
+    from readerserver.resolution.scoring import cross_linked
+
+    a = rec(source="mangaupdates", title="X", related_urls=["https://myanimelist.net/manga/120/Sequel"], external_ids={"mangaupdates": "1"})
+    b = rec(source="mal", title="Y", external_ids={"mal": "120"})
+    assert hard_match(a, b) is None and cross_linked(a, b)
+
+
+def test_version_conflict_blocks_even_authoritative_id_hard_match():
+    a = rec(source="anilist", title="Shadow Slave (WN)", external_ids={"mal": "5"})
+    b = rec(source="mal", title="Shadow Slave (LN)", external_ids={"mal": "5"})
+    assert hard_match(a, b) is None
 
 
 def test_hard_match_alias_incl_native_title():

@@ -81,6 +81,26 @@ async def embed_synopses(session: AsyncSession, embedder: Embedder, limit: int =
     return len(recs)
 
 
+async def embed_record_synopses(session: AsyncSession, embedder: Embedder, recs: list[SourceRecord]) -> int:
+    """Synopsis vectors for exactly these records (the current resolution batch). Failures never raise: records left
+    without a vector are deferred by the caller and retried later."""
+    todo = [r for r in recs if r.synopsis and r.synopsis_embedding is None]
+    if not todo:
+        return 0
+    try:
+        vecs = await embedder.embed([synopsis_input(r) for r in todo], "document", "synopsis")
+    except BudgetExceeded:
+        log.warning("budget reached; synopsis embeddings deferred")
+        return 0
+    except Exception:
+        log.exception("synopsis embedding failed; deferred")
+        return 0
+    for r, v in zip(todo, vecs, strict=True):
+        r.synopsis_embedding = v
+    await session.flush()
+    return len(todo)
+
+
 async def index_profiles(session: AsyncSession, embedder: Embedder, settings: Settings, limit: int = 256) -> int:
     """(Re)embed profiles of works touched by records with needs_index, when the profile text changed.
     Returns the number of works processed (0 = nothing left or deferred by the budget)."""

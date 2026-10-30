@@ -154,3 +154,119 @@ async def test_recrawl_unchanged_record_does_not_reset_flags(session):
     assert changed is False and rec.needs_resolution is False
     _, changed = await upsert_record(session, D(source="a", source_id="1", title="T2"))
     assert changed is True and rec.needs_resolution is True
+
+
+# ---------------------------------------------------------------- review-3 resolution findings
+async def test_manual_link_record_recrawl_rebuilds_work_and_clears_pending(session):
+    r = Resolver(None)
+    a = await add(session, source="mal", source_id="1", title="Same Title Here", external_ids={"mal": "1"}, chapter_count=10)
+    await resolve(session, r, a)
+    b = await add(session, source="anilist", source_id="2", title="Other", external_ids={"mal": "1", "anilist": "2"}, chapter_count=10)
+    await resolve(session, r, b)
+    res = await unlink_record(session, b.id)
+    await session.commit()
+    _, changed = await upsert_record(session, D(source="anilist", source_id="2", title="Other Renamed", external_ids={"mal": "1", "anilist": "2"}, chapter_count=99))
+    await session.commit()
+    assert changed and b.needs_resolution
+    out = await resolve(session, r, b)
+    assert out["action"] == "locked" and b.needs_resolution is False and b.needs_index is True
+    work = await session.get(Work, res["new_work_id"])
+    assert work.title == "Other Renamed" and work.chapter_count == 99  # canonical metadata refreshed
+    assert (await session.scalar(select(func.count()).select_from(SourceRecord).where(SourceRecord.needs_resolution.is_(True)))) == 0
+
+
+async def test_split_constraint_is_symmetric_when_the_other_record_changes(session):
+    from readerserver.models import LinkSeparation
+
+    r = Resolver(None)
+    a = await add(session, source="mal", source_id="1", title="Same Title Here", external_ids={"mal": "1"}, chapter_count=5)
+    await resolve(session, r, a)
+    b = await add(session, source="anilist", source_id="2", title="Other", external_ids={"mal": "1", "anilist": "2"})
+    out = await resolve(session, r, b)
+    wid_ab = out["work_id"]
+    res = await unlink_record(session, b.id)
+    await session.commit()
+    assert await session.scalar(select(func.count()).select_from(LinkSeparation)) == 1
+    # A changes; it is a singleton now and shares an authoritative id with B, yet must not merge into B's work
+    await upsert_record(session, D(source="mal", source_id="1", title="Same Title Here", external_ids={"mal": "1"}, chapter_count=6))
+    await session.commit()
+    outa = await resolve(session, r, a)
+    assert outa["work_id"] == wid_ab and outa["work_id"] != res["new_work_id"]
+    assert await n_works(session) == 2
+    # and the converse: an incoming brand-new record linking to both does not bridge them
+    c = await add(session, source="mu", source_id="9", title="Same Title Here", external_ids={"mal": "1"})
+    outc = await resolve(session, r, c)
+    assert outc["action"] == "merged"
+    assert {await session.scalar(select(WorkLink.work_id).where(WorkLink.source_record_id == x.id, WorkLink.undone_at.is_(None))) for x in (a, b)} == {wid_ab, res["new_work_id"]}
+
+
+async def test_singleton_update_keeps_its_work_id_and_history(session):
+    r = Resolver(None)
+    a = await add(session, source="a", source_id="1", title="Lonely Novel", chapter_count=10, authors=["Zed Q"], language="en")
+    wid = (await resolve(session, r, a))["work_id"]
+    await add(session, source="b", source_id="2", title="Unrelated Thing Entirely", authors=["Other P"], language="ko")
+    await upsert_record(session, D(source="a", source_id="1", title="Lonely Novel", chapter_count=250, authors=["Zed Q"], language="en"))
+    await session.commit()
+    out = await resolve(session, r, a)
+    assert out["work_id"] == wid and out["action"] == "new"
+    assert (await session.get(Work, wid)).chapter_count == 250
+    assert await session.scalar(select(func.count()).select_from(WorkLink).where(WorkLink.source_record_id == a.id)) == 1  # no churn
+
+
+async def test_singleton_that_later_merges_still_releases_old_work(session):
+    r = Resolver(None)
+    a = await add(session, source="a", source_id="1", title="Unique Zebra Quest Tale", language="en")
+    wa = (await resolve(session, r, a))["work_id"]
+    b = await add(session, source="b", source_id="2", title="Another Distinct Name", language="en", external_ids={"x": "1"})
+    wb = (await resolve(session, r, b))["work_id"]
+    await upsert_record(session, D(source="a", source_id="1", title="Unique Zebra Quest Tale", language="en", external_ids={"x": "1"}))
+    await session.commit()
+    out = await resolve(session, r, a)
+    assert out["work_id"] == wb and await session.get(Work, wa) is None
+
+
+async def test_split_marks_both_works_profiles_stale(session):
+    r = Resolver(None)
+    a = await add(session, source="mal", source_id="1", title="Same Title Here", external_ids={"mal": "1"})
+    await resolve(session, r, a)
+    b = await add(session, source="anilist", source_id="2", title="Other", external_ids={"mal": "1", "anilist": "2"})
+    await resolve(session, r, b)
+    for x in (a, b):
+        x.needs_index = False
+    await session.commit()
+    await unlink_record(session, b.id)
+    await session.commit()
+    await session.refresh(a)
+    assert a.needs_index is True and b.needs_index is True  # old work's remaining record too, so its vector is rebuilt
+
+
+async def test_descriptive_cross_link_does_not_auto_merge_sequel(session):
+    r = Resolver(None)
+    first = await add(session, source="mal", source_id="120", title="Maburaho", external_ids={"mal": "120"}, language="ja")
+    await resolve(session, r, first)
+    seq = await add(session, source="novelupdates", source_id="s", title="Totally Other Sequel Name", language="ja",
+                    external_ids={"novelupdates": "s"}, related_urls=["https://myanimelist.net/manga/120/Maburaho"])
+    out = await resolve(session, r, seq)
+    assert out["action"] == "new" and await n_works(session) == 2  # before: unconditional merge via external_ids
+
+
+async def test_wn_ln_with_shared_id_is_not_auto_merged(session):
+    r = Resolver(None)
+    wn = await add(session, source="mal", source_id="5", title="Shadow Slave (WN)", external_ids={"mal": "5"})
+    await resolve(session, r, wn)
+    ln = await add(session, source="anilist", source_id="6", title="Shadow Slave (LN)", external_ids={"anilist": "6", "mal": "5"})
+    out = await resolve(session, r, ln)
+    assert out["action"] == "new" and await n_works(session) == 2
+
+
+async def test_verdict_outage_keeps_record_pending_with_retry_time(session):
+    r0 = Resolver(None)
+    a = await add(session, source="a", source_id="1", title="Shadow Slave (WN)", authors=["Guiltythree"], language="en", start_year=2021)
+    await resolve(session, r0, a)
+    b = await add(session, source="b", source_id="2", title="Shadow Slave (LN)", authors=["Guiltythree"], language="en", start_year=2021)
+    out = await resolve(session, Resolver(FakeVerdicts(exc=RuntimeError("down"))), b)
+    assert out["pending_verdict"] and b.needs_resolution is True and b.resolve_reason == "pending_verdict" and b.resolve_retry_at is not None
+    # later the provider works: the same record is re-decided (and its provisional work id reused when still separate)
+    v = FakeVerdicts(MatchVerdict("RELATED_WORK", 0.9, "claude", {}, "rewrite", "LN_VERSION"))
+    out2 = await resolve(session, Resolver(v), b)
+    assert out2["action"] == "related" and out2["work_id"] == out["work_id"] and b.needs_resolution is False and b.resolve_reason is None

@@ -69,6 +69,17 @@ pipeline: synopsis embeddings -> entity resolution -> profile embeddings. Re-cra
 | `GET /admin/works/{id}/records`, `POST /admin/records/{record_id}/unlink` | inspect links (method, confidence, evidence) / split a record out |
 | `GET /admin/spend` | month-to-date spend per provider/purpose |
 
+### Crawler safety
+
+`PoliteClient` follows redirects manually (max 5 hops); every hop is checked against the source's host allowlist
+(`services.SOURCE_HOSTS`), resolved and rejected if private/loopback/link-local/CGNAT (100.64/10, Tailscale)/unique-local,
+then robots-checked and rate-limited. robots.txt follows RFC 9309 (2xx parsed; 4xx except 429 = allow all; 5xx/429/network
+= temporary disallow-all, retried after `robots_retry`; challenge = blocked) and is cached with a TTL. `Retry-After`
+(seconds or HTTP-date) is a minimum wait; waits above 5 min defer the crawl (`crawl_state.next_eligible_at`, checkpoint
+kept). A running crawl holds a heartbeat lease (`CRAWL_LEASE_SECONDS`); an expired lease means the worker died and the
+run is resumed from its checkpoint. A 403/challenge during chapter sampling marks the source blocked; sampling never
+starts after a blocked catalog run. Known limit: DNS is resolved for the check and again by the HTTP stack (no pinning).
+
 ## Tailscale
 
 Tailscale is installed but logged out. Once: `sudo tailscale up`. The API container binds to loopback only
@@ -103,15 +114,22 @@ The phone (on the tailnet) calls that URL with the bearer token. Do not use `tai
    become new canonical tags tagged with their origin); ratings stay per source (normalized to 0-10 in responses); all
    source URLs are returned.
 5. Undo: `POST /admin/records/{id}/unlink` splits the record into its own work (method `manual`, locked from auto
-   re-merge) and blocks re-merging into the old work. Already-linked records in multi-record works keep their link on
-   re-crawl; singletons are re-evaluated.
+   re-merge), blocks re-merging into the old work and stores a symmetric do-not-merge constraint (`link_separations`)
+   against every record left behind, enforced for either side. Already-linked records in multi-record works keep their
+   link on re-crawl; singletons are re-evaluated but keep their work id when they stay separate. Only authoritative ids
+   (a source's own id, AniList `idMal`) hard-match; links found in descriptions/related URLs are scoring evidence only,
+   and WN-vs-LN version conflicts never auto-merge. Resolution runs under a Postgres advisory lock, per-record
+   savepoints, in bounded batches that embed the batch's synopses first; records whose embedding/verdict provider is
+   unavailable stay pending (`resolve_reason`, `resolve_retry_at`) and are retried with backoff.
 
 **Search** (`search/pipeline.py`): Claude Haiku 5.5 (`HYDE_MODEL`) -> filters + 2-3 scenes + hypothetical synopsis/tags.
 Voyage query embeddings -> kNN over sample chunks per scene, over profiles with the synopsis and (at half weight) each
 scene -> reciprocal rank fusion (k=60): per-scene RRF summed, times `1 + 0.25*(distinct scenes - 1)`, plus the weighted
 profile RRF. Metadata filters (language, status, chapter range, include tags = all, exclude tags = none; tags mapped to
 canonical names) are applied inside the kNN SQL. Top ~20 -> Claude Sonnet 5.5 rerank with one-line reasons. If the
-budget is exhausted or the rerank fails, results come back in retrieval order with a `notes` entry.
+budget is exhausted or Claude/rerank fails (provider errors are translated to `LLMError`), results come back in retrieval
+order with a `notes` entry; a successful rerank is respected (ids de-duplicated, omitted candidates dropped). Supplied
+scenes + synopsis skip HyDE (default filters) and work without Claude.
 
 **Embeddings**: Voyage `voyage-4-large` (best multilingual quality, 1024 dims, 32k context), `input_type=document` for
 profiles/chunks and `query` for searches. Chunks are ~700 tokens, vectors only; chapter text is discarded after embedding
@@ -120,8 +138,10 @@ and never stored. HNSW (cosine) indexes on all vector columns; GIN trigram index
 ## Cost notes
 
 `MONTHLY_AI_BUDGET_USD` (default 5) caps all providers per calendar month; each call is recorded in `ai_usage`
-(`GET /admin/spend`). Before every Claude/Voyage/Jev call the month-to-date total is checked, so one call can overshoot
-slightly. Embedding stops (indexing is deferred, searches get HTTP 402) when the cap is reached; rerank degrades
+(`GET /admin/spend`). Before every Claude/Voyage/Jev call the estimated maximum cost is reserved atomically in Postgres
+(`ai_spend_reservations`, advisory lock; shared by the API and worker processes), then settled against the real usage
+(per `usage.iterations` attempt at each serving model's price incl. cache tokens) or released on failure; stale
+reservations expire after 15 min. Embedding stops (indexing is deferred, searches get HTTP 402) when the cap is reached; rerank degrades
 gracefully. Prices used: Claude Sonnet 5.5 $2/$10 and Haiku 5.5 $0.10/$0.50 per 1M tokens; Voyage
 `VOYAGE_PRICE_PER_MTOK` (default 0.12, an estimate - adjust) and `JEV_PRICE_PER_CALL` (default 0.002, an estimate).
 A search costs roughly one Haiku call + one Sonnet rerank + one small embedding call. Large first crawls cost mostly

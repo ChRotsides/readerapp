@@ -60,7 +60,7 @@ def parse_series_page(html: str, slug: str) -> SourceRecordData | None:
     img = doc.select_one(".seriesimg img")
     link_scope = doc.select("#showtranslated a, #showepublisher a, #showopublisher a, #showlicensed a, #editdescription a")
     hrefs = uniq([a["href"] for a in link_scope if a.get("href", "").startswith("http") and "novelupdates.com" not in a["href"]])
-    ids, urls = extract_links(" ".join([desc or "", *hrefs]))
+    _, urls = extract_links(" ".join([desc or "", *hrefs]))  # descriptive links only (see anilist/mangaupdates)
     chapters = to_int(status_txt)
     return SourceRecordData(
         source="novelupdates", source_id=slug, url=f"{BASE}/series/{slug}/", title=title,
@@ -72,7 +72,7 @@ def parse_series_page(html: str, slug: str) -> SourceRecordData | None:
         rating_votes=to_int(rm.group(3)) if rm else None,
         language=lang_code(text_of(doc.select_one("#showlang a"))), start_year=year_of(text_of(doc.select_one("#edityear"))),
         cover_url=img.get("src") if img else None,
-        external_ids={"novelupdates": slug, **ids},
+        external_ids={"novelupdates": slug},
         related_urls=uniq([*hrefs, *urls]),
         raw={
             "type": text_of(doc.select_one("#showtype")),

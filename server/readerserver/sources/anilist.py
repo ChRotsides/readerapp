@@ -36,9 +36,9 @@ def parse_media(m: dict[str, Any]) -> SourceRecordData:
     if desc:
         desc = re.sub(r"\(Source:[^)]*\)\s*$", "", desc).strip()
     ext_text = " ".join(l["url"] for l in (m.get("externalLinks") or []))
-    ids, urls = extract_links(ext_text)
-    ids["anilist"] = str(m["id"])
-    if m.get("idMal"):
+    _, urls = extract_links(ext_text)  # descriptive cross-links: kept as related_urls only, never as identity ids
+    ids = {"anilist": str(m["id"])}
+    if m.get("idMal"):  # AniList's own structured MAL mapping IS authoritative
         ids["mal"] = str(m["idMal"])
     score = m.get("averageScore") or m.get("meanScore")
     return SourceRecordData(

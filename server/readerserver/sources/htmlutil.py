@@ -1,12 +1,15 @@
 """Helpers shared by the HTML-site sources (5b)."""
 import json
+import logging
 import re
 from typing import Any
 from xml.etree import ElementTree
 
 from bs4 import BeautifulSoup, Tag
 
-from ..crawl.http import PoliteClient
+from ..crawl.http import PoliteClient, UnsafeURL
+
+log = logging.getLogger(__name__)
 
 LANG_NAMES = {
     "chinese": "zh", "japanese": "ja", "korean": "ko", "english": "en", "中国": "zh", "日本": "ja", "한국": "ko",
@@ -105,7 +108,11 @@ def parse_sitemap(xml: str) -> list[tuple[str, str]]:
 
 async def get_html(http: PoliteClient, url: str, **kw) -> str | None:
     """GET -> text, or None for 404/410 (work removed). Blocks/robots propagate as BlockedError/RobotsDisallowed."""
-    resp = await http.get(url, **kw)
+    try:
+        resp = await http.get(url, **kw)
+    except UnsafeURL as e:  # poisoned sitemap/link: skip the item instead of wedging the whole crawl
+        log.warning("skipping unsafe URL: %s", e)
+        return None
     if resp.status_code in (404, 410):
         return None
     resp.raise_for_status()

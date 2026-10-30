@@ -1,8 +1,9 @@
 """Entity resolution pipeline: hard matches -> candidates -> scoring -> auto-merge / separate / typed verdict.
 Records are never overwritten; they are linked (reversibly) to canonical Works."""
 import logging
+import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import and_, delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +12,7 @@ from ..ai.jev import VerdictProvider
 from ..models import (
     CanonicalTag,
     LinkBlock,
+    LinkSeparation,
     SourceRecord,
     SourceTitle,
     TagMapping,
@@ -18,6 +20,7 @@ from ..models import (
     WorkLink,
     WorkRelation,
 )
+from ..sources.util import extract_links
 from ..text import normalize_title, version_marker
 from .merge import canonicalize_tags, merge_records, normalize_tag
 from .scoring import VERDICT_SAME_MIN, Score, decide, hard_match, score_pair
@@ -95,6 +98,8 @@ async def rebuild_work(session: AsyncSession, work_id: uuid.UUID) -> Work | None
               "status", "chapter_count", "language", "start_year", "cover_url"):
         setattr(work, f, getattr(m, f))
     work.updated_at = datetime.now(UTC)
+    for r in recs:  # membership/content changed: this work's profile embedding must be recomputed (hash-checked later)
+        r.needs_index = True
     return work
 
 
@@ -114,7 +119,16 @@ async def link_record(session: AsyncSession, rec: SourceRecord, work_id: uuid.UU
     await session.flush()
 
 
-async def new_work_for(session: AsyncSession, rec: SourceRecord, method: str = "new", evidence: dict | None = None) -> uuid.UUID:
+async def new_work_for(session: AsyncSession, rec: SourceRecord, method: str = "new", evidence: dict | None = None,
+                       reuse: uuid.UUID | None = None) -> uuid.UUID:
+    """Give `rec` a Work of its own. With `reuse` (the record's current singleton work that stays separate) the
+    existing work id is kept, so links to it never break; new ids are only for new records or explicit splits."""
+    if reuse is not None:
+        cur = await current_link(session, rec.id)
+        if cur is not None and cur.work_id == reuse:
+            cur.method, cur.confidence, cur.evidence = method, 1.0, evidence or {}
+            await session.flush()
+            return reuse
     w = Work(title=rec.title)
     session.add(w)
     await session.flush()
@@ -147,11 +161,26 @@ async def _linked_work(session: AsyncSession, rec_id: int) -> uuid.UUID | None:
     return l.work_id if l else None
 
 
+LINK_PATTERNS = {"mal": r"myanimelist\.net/manga/{}", "anilist": r"anilist\.co/manga/{}", "syosetu": r"ncode\.syosetu\.com/{}"}
+
+
 async def hard_candidates(session: AsyncSession, rec: SourceRecord) -> list[SourceRecord]:
     ids: set[int] = set()
     for k, v in (rec.external_ids or {}).items():
         q = select(SourceRecord.id).where(SourceRecord.external_ids.contains({k: v}), SourceRecord.id != rec.id)
         ids.update((await session.scalars(q)).all())
+    # Descriptive links (ids inside related URLs, either direction) only nominate candidates; scoring decides.
+    linked_ids, _ = extract_links(" ".join(rec.related_urls or []))
+    for k, v in linked_ids.items():
+        q = select(SourceRecord.id).where(SourceRecord.external_ids.contains({k: v}), SourceRecord.id != rec.id)
+        ids.update((await session.scalars(q)).all())
+    for k, v in (rec.external_ids or {}).items():
+        frag = LINK_PATTERNS.get(k)
+        if frag:
+            rx = frag.format(re.escape(str(v))) + r"(\D|$)"
+            q = select(SourceRecord.id).where(
+                func.array_to_string(SourceRecord.related_urls, " ").op("~*")(rx), SourceRecord.id != rec.id)
+            ids.update((await session.scalars(q)).all())
     if rec.url:
         q = select(SourceRecord.id).where(SourceRecord.related_urls.contains([rec.url]), SourceRecord.id != rec.id)
         ids.update((await session.scalars(q)).all())
@@ -190,6 +219,43 @@ async def fuzzy_candidates(session: AsyncSession, rec: SourceRecord) -> dict[int
     return found
 
 
+# ---------------------------------------------------------------- constraints
+async def separated_record_ids(session: AsyncSession, rec_id: int) -> set[int]:
+    rows = (await session.execute(
+        select(LinkSeparation.record_a_id, LinkSeparation.record_b_id)
+        .where((LinkSeparation.record_a_id == rec_id) | (LinkSeparation.record_b_id == rec_id)))).all()
+    return {b if a == rec_id else a for a, b in rows}
+
+
+async def forbidden_works(session: AsyncSession, rec: SourceRecord) -> set[uuid.UUID]:
+    """Works `rec` must never join: explicit blocks, plus any work holding a record it was split from (symmetric)."""
+    blocked = set((await session.scalars(select(LinkBlock.work_id).where(LinkBlock.source_record_id == rec.id))).all())
+    sep = await separated_record_ids(session, rec.id)
+    if sep:
+        blocked |= set((await session.scalars(select(WorkLink.work_id).where(
+            WorkLink.source_record_id.in_(sep), WorkLink.undone_at.is_(None)))).all())
+    return blocked
+
+
+async def add_separation(session: AsyncSession, a: int, b: int) -> None:
+    lo, hi = min(a, b), max(a, b)
+    if lo == hi:
+        return
+    if not await session.scalar(select(LinkSeparation).where(LinkSeparation.record_a_id == lo, LinkSeparation.record_b_id == hi)):
+        session.add(LinkSeparation(record_a_id=lo, record_b_id=hi))
+
+
+def settle_resolution(rec: SourceRecord, deferred: str | None = None) -> None:
+    """Clear the pending flag, or keep it with a durable reason + exponential retry time when a prerequisite
+    (synopsis embedding, verdict provider) was unavailable."""
+    if deferred is None:
+        rec.needs_resolution, rec.resolve_reason, rec.resolve_retry_at, rec.resolve_attempts = False, None, None, 0
+        return
+    attempts = (rec.resolve_attempts or 0) + 1
+    rec.needs_resolution, rec.resolve_reason, rec.resolve_attempts = True, deferred, attempts
+    rec.resolve_retry_at = datetime.now(UTC) + min(timedelta(minutes=30) * 2 ** (attempts - 1), timedelta(hours=24))
+
+
 # ---------------------------------------------------------------- main
 class Resolver:
     def __init__(self, verdicts: VerdictProvider | None):
@@ -200,19 +266,23 @@ class Resolver:
         cur = await current_link(session, rec.id)
         if cur is not None:
             if cur.method == "manual":
+                # Manual placement is kept, but the (re-crawled) record still refreshes its work's canonical data.
+                await rebuild_work(session, cur.work_id)
+                settle_resolution(rec)
+                rec.needs_index = True
                 return {"action": "locked", "work_id": cur.work_id}
             n_in_work = await session.scalar(select(func.count()).select_from(WorkLink).where(
                 WorkLink.work_id == cur.work_id, WorkLink.undone_at.is_(None)))
             if n_in_work and n_in_work > 1:
                 await rebuild_work(session, cur.work_id)
-                rec.needs_resolution = False
+                settle_resolution(rec)
                 return {"action": "kept", "work_id": cur.work_id}
-        old_work = cur.work_id if cur else None
-        blocked = set((await session.scalars(select(LinkBlock.work_id).where(LinkBlock.source_record_id == rec.id))).all())
+        old_work = cur.work_id if cur else None  # here: None or a singleton work owned by this record
+        blocked = await forbidden_works(session, rec)
 
-        outcome = await self._decide(session, rec, blocked)
+        outcome = await self._decide(session, rec, blocked, reuse=old_work)
         target = outcome["work_id"]
-        rec.needs_resolution = False
+        settle_resolution(rec, "pending_verdict" if outcome.get("pending_verdict") else None)
         touched = {target}
         if old_work and old_work != target:
             touched.add(old_work)
@@ -221,10 +291,11 @@ class Resolver:
         rec.needs_index = True
         return outcome
 
-    async def _decide(self, session: AsyncSession, rec: SourceRecord, blocked: set[uuid.UUID]) -> dict:
-        # Step 1: hard matches
+    async def _decide(self, session: AsyncSession, rec: SourceRecord, blocked: set[uuid.UUID], reuse: uuid.UUID | None = None) -> dict:
+        # Step 1: hard matches (authoritative ids / distinctive aliases)
         hard: dict[uuid.UUID, tuple[str, dict, int]] = {}
-        for cand in await hard_candidates(session, rec):
+        hard_cands = await hard_candidates(session, rec)
+        for cand in hard_cands:
             hm = hard_match(rec, cand)
             wid = await _linked_work(session, cand.id)
             if hm and wid and wid not in blocked:
@@ -234,12 +305,14 @@ class Resolver:
                 WorkLink.work_id == w, WorkLink.undone_at.is_(None))) for w in hard}
             wid = max(hard, key=lambda w: counts[w])
             method, ev, _ = hard[wid]
-            conf = 0.99 if ev.get("id") or ev.get("url_crossref") else 0.95
+            conf = 0.99 if ev.get("id") else 0.95
             await link_record(session, rec, wid, method, conf, ev)
             return {"action": "merged", "work_id": wid, "method": method, "confidence": conf}
 
-        # Steps 2-3: candidates and scoring (best per work)
+        # Steps 2-3: candidates (fuzzy + descriptive-link/other lookups that did not hard-match) and scoring
         cands = await fuzzy_candidates(session, rec)
+        for c in hard_cands:
+            cands.setdefault(c.id, None)
         best: tuple[uuid.UUID, Score, SourceRecord] | None = None
         if cands:
             recs = list((await session.scalars(select(SourceRecord).where(SourceRecord.id.in_(list(cands))))).all())
@@ -251,7 +324,7 @@ class Resolver:
                 if best is None or sc.total > best[1].total:
                     best = (wid, sc, c)
         if best is None:
-            wid = await new_work_for(session, rec)
+            wid = await new_work_for(session, rec, reuse=reuse)
             return {"action": "new", "work_id": wid, "method": "new", "confidence": 1.0}
         wid, sc, other = best
         decision = decide(sc)
@@ -260,7 +333,7 @@ class Resolver:
             await link_record(session, rec, wid, "auto_score", round(sc.total, 3), ev)
             return {"action": "merged", "work_id": wid, "method": "auto_score", "confidence": sc.total}
         if decision == "separate":
-            new = await new_work_for(session, rec, "new", ev)
+            new = await new_work_for(session, rec, "new", ev, reuse=reuse)
             return {"action": "new", "work_id": new, "method": "new", "confidence": 1.0}
 
         # middle band (or WN/LN conflict): typed verdict
@@ -271,15 +344,18 @@ class Resolver:
             except Exception as e:
                 log.warning("verdict unavailable for record %s: %s", rec.id, e)
         if verdict is None:  # no verdict possible: be conservative, keep separate and relate if markers conflict
-            new = await new_work_for(session, rec, "new", ev | {"verdict": "unavailable"})
+            new = await new_work_for(session, rec, "new", ev | {"verdict": "unavailable"}, reuse=reuse)
             if sc.marker_conflict:
                 await add_relation(session, new, wid, "LN_VERSION", "heuristic", 0.5)
-            return {"action": "new", "work_id": new, "method": "new", "confidence": 1.0, "pending_verdict": True}
+            out = {"action": "new", "work_id": new, "method": "new", "confidence": 1.0}
+            if self.verdicts is not None:  # a provider exists but failed: durable retry (settle_resolution keeps it pending)
+                out["pending_verdict"] = True
+            return out
         ev |= {"verdict": verdict.verdict, "probability": verdict.probability, "probs": verdict.probabilities, "reason": verdict.reason}
         if verdict.verdict == "SAME_WORK" and verdict.probability >= VERDICT_SAME_MIN:
             await link_record(session, rec, wid, verdict.method, round(verdict.probability, 3), ev)
             return {"action": "merged", "work_id": wid, "method": verdict.method, "confidence": verdict.probability}
-        new = await new_work_for(session, rec, "new", ev)
+        new = await new_work_for(session, rec, "new", ev, reuse=reuse)
         if verdict.verdict == "RELATED_WORK":
             rtype = verdict.relation or ("LN_VERSION" if sc.marker_conflict else "RELATED")
             await add_relation(session, new, wid, rtype, verdict.method, verdict.probability)
@@ -289,8 +365,9 @@ class Resolver:
 
 # ---------------------------------------------------------------- undo
 async def unlink_record(session: AsyncSession, rec_id: int) -> dict:
-    """Split a record out of its work: undo the link (kept for audit), block re-merging into that work, give the
-    record its own Work. Source data is untouched; if the old work empties it is deleted."""
+    """Split a record out of its work: undo the link (kept for audit), block re-merging into that work, record a
+    symmetric do-not-merge constraint against every record that stayed behind, give the record its own Work.
+    Source data is untouched; if the old work empties it is deleted. Both works' profile vectors are marked stale."""
     rec = await session.get(SourceRecord, rec_id)
     if rec is None:
         raise LookupError("record not found")
@@ -298,10 +375,13 @@ async def unlink_record(session: AsyncSession, rec_id: int) -> dict:
     if cur is None:
         raise LookupError("record is not linked")
     old = cur.work_id
+    others = [r.id for r in await active_records(session, old) if r.id != rec_id]
     cur.undone_at = datetime.now(UTC)
     exists = await session.scalar(select(LinkBlock).where(LinkBlock.source_record_id == rec_id, LinkBlock.work_id == old))
     if not exists:
         session.add(LinkBlock(source_record_id=rec_id, work_id=old))
+    for o in others:
+        await add_separation(session, rec_id, o)
     await session.flush()
     new = await new_work_for(session, rec, "manual", {"split_from": str(old)})
     await rebuild_work(session, old)

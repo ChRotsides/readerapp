@@ -78,27 +78,74 @@ async def test_full_pipeline_with_rerank(maker, corpus, fake_embedder, fake_llm)
 
 
 async def test_filters_applied_in_retrieval(maker, corpus, fake_embedder, fake_llm):
+    ids = await work_ids(maker)
     fake_llm.add("HydeOutput", hyde(language="ko"))
-    fake_llm.add("RerankOutput", RerankOutput(ranking=[]))
+    fake_llm.add("RerankOutput", RerankOutput(ranking=[RerankItem(work_id=ids["Moonlit Bakery"], reason="r")]))
     res = await run(maker, corpus, fake_embedder, fake_llm, SearchRequest(description="dragon romance bread"))
     assert [r.title for r in res.results] == ["Moonlit Bakery"]
-    assert not res.reranked  # empty rerank -> retrieval order kept
 
     fake_llm.queue.clear()
     fake_llm.add("HydeOutput", hyde(min_chapters=250, exclude_tags=["isekai", "Romance"], include_tags=["cooking"]))
-    fake_llm.add("RerankOutput", RerankOutput(ranking=[]))
+    fake_llm.add("RerankOutput", RerankOutput(ranking=[RerankItem(work_id=ids["Dragon Chef"], reason="r")]))
     res = await run(maker, corpus, fake_embedder, fake_llm, SearchRequest(description="x"))
     assert [r.title for r in res.results] == ["Dragon Chef"]
 
 
 async def test_supplied_scenes_skip_generation_and_request_filters_win(maker, corpus, fake_embedder, fake_llm):
-    fake_llm.add("RerankOutput", RerankOutput(ranking=[]))
+    ids = await work_ids(maker)
+    fake_llm.add("RerankOutput", RerankOutput(ranking=[RerankItem(work_id=ids["Sword Saint Rises"], reason="r")]))
     req = SearchRequest(description="swords", scenes=["He drew his sword in the arena."], synopsis="A swordsman in a tournament",
                         filters=SearchFilters(status="ongoing"))
     res = await run(maker, corpus, fake_embedder, fake_llm, req)
     assert all(c["schema"] != "HydeOutput" for c in fake_llm.calls)
     assert res.results[0].title == "Sword Saint Rises" and res.scenes == ["He drew his sword in the arena."]
     assert {r.status for r in res.results} == {"ongoing"}
+
+
+async def work_ids(maker):
+    from readerserver.models import Work
+
+    async with maker() as s:
+        return {w.title: str(w.id) for w in (await s.scalars(select(Work))).all()}
+
+
+async def test_supplied_hypotheticals_work_without_any_llm(maker, corpus, fake_embedder):
+    req = SearchRequest(description="swords", scenes=["He drew his sword in the arena."], synopsis="A swordsman in a tournament")
+    res = await run(maker, corpus, fake_embedder, None, req)  # llm=None: no HyDE (default filters), no rerank
+    assert res.results[0].title == "Sword Saint Rises" and not res.reranked and any("rerank" in n for n in res.notes)
+
+
+async def test_provider_errors_fall_back_to_retrieval_only(maker, corpus, fake_embedder):
+    from readerserver.ai.llm import LLMError
+
+    class Down:
+        async def parse(self, **kw):
+            raise LLMError("anthropic down")
+
+    res = await run(maker, corpus, fake_embedder, Down(), SearchRequest(description="dragon cook restaurant"))
+    assert res.results and not res.reranked and len(res.notes) == 2  # HyDE and rerank both degraded, no exception
+
+
+async def test_rerank_dedupes_ids_and_respects_subset_and_empty(maker, corpus, fake_embedder, fake_llm):
+    ids = await work_ids(maker)
+    fake_llm.add("HydeOutput", hyde())
+    fake_llm.add("RerankOutput", RerankOutput(ranking=[RerankItem(work_id=ids["Moonlit Bakery"], reason="a"),
+                                                      RerankItem(work_id=ids["Moonlit Bakery"], reason="dup"),
+                                                      RerankItem(work_id=ids["Dragon Chef"], reason="b")]))
+    res = await run(maker, corpus, fake_embedder, fake_llm, SearchRequest(description="dragon"))
+    got = [r.work_id for r in res.results]
+    assert got == [ids["Moonlit Bakery"], ids["Dragon Chef"]] and res.reranked  # no duplicates, omitted Sword Saint dropped
+    assert res.results[0].reason == "a"
+    fake_llm.queue.clear()
+    fake_llm.add("HydeOutput", hyde())
+    fake_llm.add("RerankOutput", RerankOutput(ranking=[]))
+    res = await run(maker, corpus, fake_embedder, fake_llm, SearchRequest(description="dragon"))
+    assert res.results == [] and res.reranked  # a successful empty verdict is not "restored"
+    fake_llm.queue.clear()
+    fake_llm.add("HydeOutput", hyde())
+    fake_llm.add("RerankOutput", RerankOutput(ranking=[RerankItem(work_id="bogus", reason="x")]))
+    res = await run(maker, corpus, fake_embedder, fake_llm, SearchRequest(description="dragon"))
+    assert res.results and not res.reranked  # nothing usable -> treated as a failed rerank
 
 
 async def test_rerank_budget_exhausted_degrades(maker, corpus, fake_embedder):
@@ -123,8 +170,9 @@ async def test_title_search_and_work_detail_via_api(maker, corpus, fake_embedder
         assert d["urls"] == [{"source": "fake", "url": "https://fake.example/n/2"}] and d["tags"]
         assert (await c.get("/works/00000000-0000-0000-0000-000000000000")).status_code == 404
         assert (await c.get("/works/not-a-uuid")).status_code == 404
+        ids_all = list((await work_ids(maker)).values())
         fake_llm.add("HydeOutput", hyde())
-        fake_llm.add("RerankOutput", RerankOutput(ranking=[]))
+        fake_llm.add("RerankOutput", RerankOutput(ranking=[RerankItem(work_id=wid, reason="r") for wid in ids_all]))
         s = await c.post("/search", json={"description": "dragon cook", "limit": 2})
         assert s.status_code == 200 and len(s.json()["results"]) == 2
         assert set(s.json()) >= {"results", "scenes", "synopsis", "tags", "filters", "reranked"}

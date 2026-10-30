@@ -30,8 +30,8 @@ def parse_series(s: dict[str, Any]) -> SourceRecordData:
     if title != s["title"]:
         alts.append(s["title"])
     desc = s.get("description")
-    ids, urls = extract_links(desc)
-    ids["mangaupdates"] = str(s["series_id"])
+    _, urls = extract_links(desc)  # links in free-text descriptions are descriptive (sequels, adaptations), not identity
+    ids = {"mangaupdates": str(s["series_id"])}
     chapters = None
     m = re.search(r"(\d[\d,]*)\s*Chapters?", s.get("status") or "")
     if m:

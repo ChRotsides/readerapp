@@ -23,7 +23,7 @@ async def run_source(sv: Services, runner: CrawlRunner, name: str, max_items: in
     source = build_source(name, sv.settings)
     try:
         res = await runner.crawl(source, max_items=max_items, fresh=fresh)
-        if res.get("status") in ("idle",) or res.get("seen"):
+        if res.get("status") == "idle":  # never sample after a blocked/deferred/failed/skipped catalog run
             await runner.sample_chapters(source)
         pipeline = await runner.process_pending()
         return res | {"pipeline": pipeline}
@@ -45,11 +45,15 @@ async def due_sources(sv: Services) -> list[str]:
         st = states.get(name)
         if st and st.status in ("blocked", "disabled") and not st.requested_at:
             continue
+        if st and st.next_eligible_at and st.next_eligible_at > now:
+            continue  # server asked us to wait (Retry-After): persisted, not slept
+        if st and st.status == "running" and st.lease_expires_at and st.lease_expires_at > now:
+            continue  # alive worker holds the lease
+        # status 'running' with an expired/missing lease = abandoned run: due again, resumed from its checkpoint
+        abandoned = bool(st and st.status == "running")
         if st and st.requested_at:
             out.append(name)
-        elif name in enabled and (st is None or st.last_finished_at is None or now - st.last_finished_at > interval or st.checkpoint):
-            if st and st.status == "running":
-                continue
+        elif name in enabled and (abandoned or st is None or st.last_finished_at is None or now - st.last_finished_at > interval or st.checkpoint):
             out.append(name)
     return out
 

@@ -53,26 +53,28 @@ class VoyageEmbedder:
     async def embed(self, texts: list[str], input_type: InputType, purpose: str = "embed") -> list[list[float]]:
         out: list[list[float] | None] = [None] * len(texts)
         for batch in make_batches(texts):
-            await self.spend.check()
-            res = None
-            for attempt in range(4):
-                try:
-                    res = await self.client.embed(
-                        [texts[i] for i in batch],
-                        model=self.settings.voyage_model,
-                        input_type=input_type,
-                        truncation=True,
-                        output_dimension=self.settings.embedding_dim,
-                    )
-                    break
-                except Exception as e:  # voyageai raises its own error types; retry transient ones
-                    if attempt == 3 or type(e).__name__ in ("AuthenticationError", "InvalidRequestError"):
-                        raise
-                    await asyncio.sleep(2**attempt)
-            assert res is not None
-            tokens = int(getattr(res, "total_tokens", 0) or 0)
-            await self.spend.record("voyage", self.settings.voyage_model, purpose, tokens, 0,
-                                    tokens * self.settings.voyage_price_per_mtok / 1_000_000)
+            est_tokens = sum(min(approx_tokens(texts[i]), 32_000) for i in batch)
+            estimate = est_tokens * self.settings.voyage_price_per_mtok / 1_000_000
+            async with self.spend.reserve(estimate, f"embed:{purpose}") as reservation:
+                res = None
+                for attempt in range(4):
+                    try:
+                        res = await self.client.embed(
+                            [texts[i] for i in batch],
+                            model=self.settings.voyage_model,
+                            input_type=input_type,
+                            truncation=True,
+                            output_dimension=self.settings.embedding_dim,
+                        )
+                        break
+                    except Exception as e:  # voyageai raises its own error types; retry transient ones
+                        if attempt == 3 or type(e).__name__ in ("AuthenticationError", "InvalidRequestError"):
+                            raise
+                        await asyncio.sleep(2**attempt)
+                assert res is not None
+                tokens = int(getattr(res, "total_tokens", 0) or 0)
+                await reservation.settle("voyage", self.settings.voyage_model, purpose, tokens, 0,
+                                         tokens * self.settings.voyage_price_per_mtok / 1_000_000)
             for i, emb in zip(batch, res.embeddings, strict=True):
                 out[i] = list(emb)
         return out  # type: ignore[return-value]
