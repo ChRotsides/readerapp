@@ -1,5 +1,9 @@
 """kNN retrieval over sample chunks and profiles, with metadata filters applied in SQL."""
-from sqlalchemy import and_, func, select, text
+import uuid
+from dataclasses import dataclass
+
+from sqlalchemy import column, func, select, text, true, values
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import ProfileEmbedding, SampleEmbedding, Work, WorkLink
@@ -90,3 +94,80 @@ async def knn_profiles(session: AsyncSession, vec: list[float], clauses: list, k
     dist = ProfileEmbedding.embedding.cosine_distance(vec)
     q = select(ProfileEmbedding.work_id).join(Work, Work.id == ProfileEmbedding.work_id).where(*clauses).order_by(dist).limit(k)
     return _dedupe((await session.execute(q)).all())
+
+
+@dataclass
+class Excerpt:
+    chapter_index: int | None
+    chunk_index: int
+    text: str
+    similarity: float
+
+
+async def work_excerpts(session: AsyncSession, work_ids: list[str], vecs: list[list[float]], k: int = 3) -> dict[str, list[Excerpt]]:
+    """For each work, its `k` chunks (with stored text) closest to any of `vecs` (similarity = 1 - the smallest cosine
+    distance to any vec), best first. One query: a LATERAL scan of each work's own chunks over its active records, exact
+    (no ANN). Works without chunk text are simply absent."""
+    if not work_ids or not vecs or k <= 0:
+        return {}
+    ids = values(column("work_id", UUID(as_uuid=True)), name="w").data([(uuid.UUID(w),) for w in work_ids])
+    dist = func.least(*[SampleEmbedding.embedding.cosine_distance(v) for v in vecs]) if len(vecs) > 1 else SampleEmbedding.embedding.cosine_distance(vecs[0])
+    best = (select(SampleEmbedding.chapter_index, SampleEmbedding.chunk_index, SampleEmbedding.chunk_text, dist.label("dist"))
+            .join(WorkLink, WorkLink.source_record_id == SampleEmbedding.source_record_id)
+            .where(WorkLink.work_id == ids.c.work_id, WorkLink.undone_at.is_(None), SampleEmbedding.chunk_text.is_not(None))
+            .order_by(dist).limit(k).lateral("best"))
+    q = select(ids.c.work_id, best.c.chapter_index, best.c.chunk_index, best.c.chunk_text, best.c.dist).select_from(ids.join(best, true()))
+    out: dict[str, list[Excerpt]] = {}
+    for wid, ch, ci, txt, d in (await session.execute(q)).all():
+        out.setdefault(str(wid), []).append(Excerpt(ch, ci, txt, 1 - float(d)))
+    for lst in out.values():
+        lst.sort(key=lambda e: -e.similarity)
+    return out
+
+
+COVERAGE_POOL = 200  # nearest candidate chunks per seed chunk
+EARLY_CHAPTERS = 10  # candidates: catalog samples and chapters below this index (beginnings vs beginnings); literal in the SQL below
+# Must match the predicate of ix_sample_embeddings_early_hnsw textually, as a literal (a bind param would stop the planner using it).
+EARLY_CLAUSE = text(f"(sample_embeddings.chapter_index IS NULL OR sample_embeddings.chapter_index < {EARLY_CHAPTERS})")
+DUPLICATE_SIM = 0.97  # a work this similar on at least half the seed chunks is the same novel
+
+
+async def coverage_scores(session: AsyncSession, seed_vecs: list[list[float]], clauses: list, exclude_records: list[int] | None = None,
+                          k: int = 100, pool: int = COVERAGE_POOL, dup_sim: float = DUPLICATE_SIM) -> tuple[list[tuple[str, float]], set[str]]:
+    """((work id, score) ranked, near-duplicate work ids): how much of the seed's chunks a work covers. One kNN query per seed
+    chunk, run sequentially on the session, over candidate chunks from the first chapters gives each its pool of `pool` rows
+    (the vector is a bound parameter, as in knn_chunk_scores, so it is parsed once per query; the planner picks the plan, an
+    exact scan is fine at this corpus size and the HNSW index is used only if the planner chooses it). The pool's last row's
+    similarity is the cutoff c_i (the minimum over ALL returned chunks, so a short pool never falls back to 0; generic
+    chunks have a high one) and a work contributes max(0, its best similarity in the pool - c_i). The score is the mean
+    contribution over ALL seed chunks (missing = 0), so covering many distinct seed chunks beats one excellent match. Works
+    whose best similarity is >= dup_sim on at least half of the seed chunks are the seed novel itself (e.g. an unresolved
+    copy) and are returned separately, not ranked."""
+    if not seed_vecs:
+        return [], set()
+    await _iterative(session, pool)
+    totals: dict[str, float] = {}
+    dups: dict[str, int] = {}
+    for vec in seed_vecs:
+        dist = SampleEmbedding.embedding.cosine_distance(vec)
+        q = (select(WorkLink.work_id, dist.label("dist"))
+             .join(SampleEmbedding, SampleEmbedding.source_record_id == WorkLink.source_record_id)
+             .join(Work, Work.id == WorkLink.work_id)
+             .where(WorkLink.undone_at.is_(None), EARLY_CLAUSE, *clauses))
+        if exclude_records:
+            q = q.where(SampleEmbedding.source_record_id.not_in(exclude_records))
+        rows = (await session.execute(q.order_by(dist).limit(pool))).all()
+        if not rows:
+            continue
+        best: dict[str, float] = {}
+        cutoff = 1.0
+        for wid, d in rows:
+            sim = 1 - float(d)
+            cutoff = min(cutoff, sim)  # the pool's weakest chunk, before rows collapse by work
+            best[str(wid)] = max(best.get(str(wid), -1.0), sim)
+        for wid, b in best.items():
+            totals[wid] = totals.get(wid, 0.0) + max(0.0, b - cutoff)
+            dups[wid] = dups.get(wid, 0) + (b >= dup_sim)
+    dupset = {w for w, n in dups.items() if n * 2 >= len(seed_vecs)}
+    ranked = sorted(((w, t / len(seed_vecs)) for w, t in totals.items() if t > 0 and w not in dupset), key=lambda x: (-x[1], x[0]))
+    return ranked[:k], dupset

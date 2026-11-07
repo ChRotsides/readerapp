@@ -144,13 +144,16 @@ class RecipeSession:
             schema=SECTION_MODELS[kind], effort=self.settings.recipe_effort, max_tokens=8000, purpose=f"{self.tag}:recipe")
 
     async def _write(self, kind: str, pages: list[tuple[str, str]], previous: dict | None, problem: Problem | None, attempts: int,
-                     check: list[tuple[str, str]] | None = None, min_chars: int = MIN_BODY_CHARS) -> dict:
+                     check: list[tuple[str, str]] | None = None, min_chars: int = MIN_BODY_CHARS,
+                     also: list[tuple[str, str]] | None = None) -> dict:
         """Claude writes the section; it must validate on `check` (default: the pages it was shown), with the problem fed
-        back on each retry."""
+        back on each retry. `also`: remembered good pages the section must work on too (each one on its own)."""
         last = problem
         for _ in range(attempts):
             sec = await self._author(kind, pages, previous, last)
             last = await self.validate(kind, sec, check or pages, min_chars)
+            if last is None and also:
+                last = await self.validate_samples(kind, sec, also, min_chars)
             if last is None:
                 self.validated.add(kind)
                 return sec.model_dump()
@@ -169,6 +172,14 @@ class RecipeSession:
         if kind == "novel":
             return await self._validate_novel(sec, pages[0])  # type: ignore[arg-type]
         return await self._validate_chapter(sec, pages, min_chars)  # type: ignore[arg-type]
+
+    async def validate_samples(self, kind: str, sec: BaseModel, samples: list[tuple[str, str]], min_chars: int = MIN_BODY_CHARS) -> Problem | None:
+        """A repair must not break pages that worked earlier in this session: it has to validate on each remembered sample."""
+        for page in samples:
+            if p := await self.validate(kind, sec, [page], min_chars):
+                return Problem(f"repaired {kind} recipe no longer works on an earlier good page: {p.label}",
+                               f"the recipe also has to keep working on this earlier page {page[0]} (it worked before): {p.feedback}")
+        return None
 
     async def _roles_problem(self, links: list[Link], expect: str, found_on: str) -> Problem | None:
         sample = _evenly(links, ROLE_SAMPLE)
@@ -241,9 +252,36 @@ class RecipeSession:
         """Make sure the recipe has this section, writing it from the sample pages if the domain lacks it."""
         if self.has(kind):
             return
+        if await self._restore_from_history(kind, pages):
+            return
         self.sections[kind] = await self._write(kind, pages, None, None, AUTHOR_ATTEMPTS)
         self.notes.append(f"wrote {kind}")
         await self._save()
+
+    async def restore(self, kind: str, pages: list[tuple[str, str]]) -> bool:
+        """Public: restore a missing section from history if one validates on `pages` (False if present already or none does)."""
+        return not self.has(kind) and await self._restore_from_history(kind, pages)
+
+    async def _restore_from_history(self, kind: str, pages: list[tuple[str, str]]) -> bool:
+        """No active recipe has this section (e.g. every version was marked broken): before asking Claude, try the section of
+        each earlier version, newest first, on the sample pages. The first that validates is saved into the (new or
+        in-progress) active version; the old rows stay as they are."""
+        for row in await self.store.versions(self.domain):
+            old = row.recipe.get(kind)
+            if row.id == self.row_id or not old:
+                continue
+            try:
+                sec = SECTION_MODELS[kind].model_validate(old)
+            except Exception:
+                continue
+            if await self.validate(kind, sec, pages) is None:
+                self.sections[kind] = old
+                self.validated.add(kind)
+                self.notes.append(f"restored {kind} from version {row.version}")
+                await self._save()
+                log.info("recipe %s: restored %s section of version %s (no active recipe had it)", self.domain, kind, row.version)
+                return True
+        return False
 
     async def _save(self) -> None:
         recipe = {k: self.sections.get(k) for k in KINDS}
@@ -256,7 +294,7 @@ class RecipeSession:
 
     async def repair(self, kind: str, url: str, html: str, problem: Problem | str, keep_on_failure: bool = False) -> None:
         """The `kind` section failed on this page. Older versions first (newest first): the first whose `kind` section
-        works on the failing page itself becomes a NEW version (only that section is taken from the old row, the other
+        works on the failing page itself and on the remembered good pages becomes a NEW version (only that section is taken from the old row, the other
         sections stay as they are now). Otherwise Claude writes version n+1 given the failing page (and earlier good
         samples), and it must work on the failing page. Raises RecipeBroken when nothing works; the active version is
         then marked broken unless `keep_on_failure` (quality-only complaints must not take a working recipe away)."""
@@ -270,14 +308,15 @@ class RecipeSession:
             old = row.recipe.get(kind)
             if row.id == self.row_id or not old or old == current:
                 continue
-            if await self.validate(kind, SECTION_MODELS[kind].model_validate(old), failing, min_chars) is None:
+            cand = SECTION_MODELS[kind].model_validate(old)
+            if await self.validate(kind, cand, failing, min_chars) is None and await self.validate_samples(kind, cand, self.samples[kind], min_chars) is None:
                 self.sections[kind] = old
                 new = await self.store.create(self.domain, {k: self.sections.get(k) for k in KINDS}, f"restored {kind} from version {row.version}", "broken")
                 self.row_id, self._built_here = new.id, True
                 log.info("recipe %s: restored %s section of version %s", self.domain, kind, row.version)
                 return
         try:
-            written = await self._write(kind, pages, current, problem, REPAIR_ATTEMPTS, check=failing, min_chars=min_chars)
+            written = await self._write(kind, pages, current, problem, REPAIR_ATTEMPTS, check=failing, min_chars=min_chars, also=self.samples[kind])
         except RecipeBroken:
             if self.row_id is not None and not keep_on_failure:
                 await self.store.mark_broken(self.row_id)

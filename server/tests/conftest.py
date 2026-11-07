@@ -16,6 +16,7 @@ os.environ["API_TOKEN"] = "test-token"
 os.environ["ANTHROPIC_API_KEY"] = ""
 os.environ["VOYAGE_API_KEY"] = ""
 os.environ["MAL_CLIENT_ID"] = ""
+os.environ["LINK_REFRESH_URLS"] = ""  # tests must not inherit the live server's refresh list from .env
 
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
@@ -54,7 +55,7 @@ class FakeLLM:
         self.queue.setdefault(schema_name, []).append(obj)
 
     async def parse(self, *, model, system, user, schema, effort, max_tokens, purpose):
-        self.calls.append({"model": model, "schema": schema.__name__, "user": user, "effort": effort, "purpose": purpose})
+        self.calls.append({"model": model, "schema": schema.__name__, "system": system, "user": user, "effort": effort, "purpose": purpose})
         q = self.queue.get(schema.__name__)
         if not q:
             raise AssertionError(f"no fake output queued for {schema.__name__}")

@@ -135,6 +135,17 @@ private fun JobCard(job: CrawlJob, busy: Boolean, onPause: (Long) -> Unit, onRes
                 style = MaterialTheme.typography.bodySmall,
             )
             Text(counters(job), style = MaterialTheme.typography.bodyMedium)
+            job.stopReason?.let { reason ->
+                Text(
+                    when (reason) {
+                        "catalog_exhausted" -> "Finished: reached the end of the catalog"
+                        "novel_complete" -> "Finished: requested chapters processed"
+                        "legacy_completion" -> "Older crawl: completion reason unavailable. Resume to check for remaining novels."
+                        else -> "Stopped: " + reason.replace('_', ' ')
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             job.error?.takeIf { it.isNotBlank() }?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             if (job.canPause || job.canResume || job.canCancel) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -8,11 +8,14 @@ import com.readerapp.search.CrawlJob
 import com.readerapp.search.CrawlRequest
 import com.readerapp.search.ConnectionResult
 import com.readerapp.search.DiscoveryApi
+import com.readerapp.search.FavoriteDto
+import com.readerapp.search.FavoritesResponse
 import com.readerapp.search.LibraryUploadRequest
 import com.readerapp.search.LibraryUploadResult
 import com.readerapp.search.SearchException
 import com.readerapp.search.SearchRequest
 import com.readerapp.search.SearchResponse
+import com.readerapp.search.SimilarRequest
 import com.readerapp.search.Work
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -35,6 +38,7 @@ class LibraryUploaderTest {
             return LibraryUploadResult(embedded = request.chapters.size)
         }
         override suspend fun search(request: SearchRequest): SearchResponse = throw UnsupportedOperationException()
+        override suspend fun similar(request: SimilarRequest): SearchResponse = throw UnsupportedOperationException()
         override suspend fun work(workId: String): Work = throw UnsupportedOperationException()
         override suspend fun searchTitle(query: String, limit: Int): List<Work> = throw UnsupportedOperationException()
         override suspend fun testConnection(): ConnectionResult = throw UnsupportedOperationException()
@@ -43,6 +47,11 @@ class LibraryUploaderTest {
         override suspend fun pauseCrawl(id: Long): CrawlJob = throw UnsupportedOperationException()
         override suspend fun resumeCrawl(id: Long): CrawlJob = throw UnsupportedOperationException()
         override suspend fun cancelCrawl(id: Long): CrawlJob = throw UnsupportedOperationException()
+        override suspend fun putFavorite(favorite: FavoriteDto): FavoriteDto = throw UnsupportedOperationException()
+        override suspend fun favorites(since: String?): FavoritesResponse = throw UnsupportedOperationException()
+        override suspend fun searches(since: String?, limit: Int): com.readerapp.search.SearchListResponse = throw UnsupportedOperationException()
+        override suspend fun searchEntry(id: String): com.readerapp.search.SearchEntryDto = throw UnsupportedOperationException()
+        override suspend fun deleteSearch(id: String) = throw UnsupportedOperationException()
     }
 
     /** In-memory store: "pending" mirrors the DAO (no record yet, or a text newer than the record). */
@@ -51,7 +60,7 @@ class LibraryUploaderTest {
         override suspend fun pendingChapterIds(): List<Long> = items.filter { i ->
             val r = recorded[i.chapterId]
             r == null || r.uploadedAt < (i.texts.maxOfOrNull { it.createdAt } ?: Long.MIN_VALUE) ||
-                r.chapterIndex != i.index || r.title != i.title || r.url != i.url
+                r.chapterIndex != i.index || r.title != i.title || r.url != i.url || r.novelUrl != LibraryUploader.libraryUrl(i.novel)
         }.map { it.chapterId }
         override suspend fun item(chapterId: Long): UploadItem? =
             items.firstOrNull { it.chapterId == chapterId }?.let { it.copy(knownHash = recorded[chapterId]?.hash) }
@@ -128,12 +137,13 @@ class LibraryUploaderTest {
     }
 
     @Test fun hashCoversIndexTitleUrlAndText() {
-        val base = UploadText.hash(1, "t", "u", "x")
-        assertEquals(base, UploadText.hash(1, "t", "u", "x"))
-        assertNotEquals(base, UploadText.hash(2, "t", "u", "x"))
-        assertNotEquals(base, UploadText.hash(1, "t2", "u", "x"))
-        assertNotEquals(base, UploadText.hash(1, "t", "u2", "x"))
-        assertNotEquals(base, UploadText.hash(1, "t", "u", "y"))
+        val base = UploadText.hash(1, "t", "u", "x", "n")
+        assertEquals(base, UploadText.hash(1, "t", "u", "x", "n"))
+        assertNotEquals(base, UploadText.hash(2, "t", "u", "x", "n"))
+        assertNotEquals(base, UploadText.hash(1, "t2", "u", "x", "n"))
+        assertNotEquals(base, UploadText.hash(1, "t", "u2", "x", "n"))
+        assertNotEquals(base, UploadText.hash(1, "t", "u", "y", "n"))
+        assertNotEquals(base, UploadText.hash(1, "t", "u", "x", "n2"))
         assertEquals(64, base.length)
     }
 
@@ -186,5 +196,58 @@ class LibraryUploaderTest {
             override suspend fun uploadLibraryChapters(request: LibraryUploadRequest): LibraryUploadResult = throw SearchException.Http(429, null)
         }
         try { LibraryUploader(FakeStore(mutableListOf(item(1))), api).run(); fail() } catch (e: SearchException.Http) { assertEquals(429, e.code) }
+    }
+
+    @Test fun uploadChaptersSendsOnlyTheGivenOnesRecordsThemAndDoesNotResendUnchanged() = runTest {
+        val api = FakeApi()
+        val store = FakeStore(mutableListOf(item(1), item(2), item(3)))
+        val up = LibraryUploader(store, api, clock = { 500 })
+        val first = up.uploadChapters(listOf(3L, 1L))
+        assertEquals(listOf(3, 1), api.uploads.single().chapters.map { it.index })
+        assertEquals(listOf(1, 3), first.indexes)
+        assertEquals(setOf(1L, 3L), store.recorded.keys)
+        assertEquals("https://x.example/n/1", api.uploads.single().novel.url)
+        api.uploads.clear()
+        val again = up.uploadChapters(listOf(1L, 3L))
+        assertTrue(api.uploads.isEmpty())
+        assertEquals(listOf(1, 3), again.indexes)
+        assertEquals(2, again.summary.unchanged)
+        // The normal run then only has chapter 2 left to send.
+        up.run()
+        assertEquals(listOf(2), api.uploads.single().chapters.map { it.index })
+    }
+
+    @Test fun uploadChaptersForceResendsUnchangedChapters() = runTest {
+        val api = FakeApi()
+        val up = LibraryUploader(FakeStore(mutableListOf(item(1))), api, clock = { 500 })
+        up.uploadChapters(listOf(1L)); api.uploads.clear()
+        assertEquals(listOf(1), up.uploadChapters(listOf(1L), force = true).indexes)
+        assertEquals(1, api.uploads.single().chapters.size)
+    }
+
+    @Test fun uploadChaptersLeavesOutChaptersWithoutTextAndRejectedOnes() = runTest {
+        val api = FakeApi().apply { rejectIndexes = setOf(2) }
+        val store = FakeStore(mutableListOf(item(1, texts = emptyList()), item(2), item(3)))
+        val r = LibraryUploader(store, api, clock = { 500 }).uploadChapters(listOf(1L, 2L, 3L), force = true)
+        assertEquals(listOf(3), r.indexes)
+        assertTrue(store.recorded[2]!!.hash.startsWith(UploadedChapter.REJECTED_PREFIX))
+        // Already known to be refused: not even tried again, not usable.
+        api.uploads.clear(); api.rejectIndexes = emptySet()
+        assertEquals(listOf(3), LibraryUploader(store, api, clock = { 600 }).uploadChapters(listOf(2L, 3L), force = true).indexes)
+        assertEquals(listOf(3), api.uploads.single().chapters.map { it.index })
+    }
+
+    @Test fun aChangedNovelUrlMakesUploadedChaptersPendingAndTheyAreResent() = runTest {
+        val api = FakeApi()
+        val store = FakeStore(mutableListOf(item(1)))
+        val up = LibraryUploader(store, api, clock = { 500 })
+        up.run(); api.uploads.clear()
+        assertEquals("https://x.example/n/1", store.recorded[1]!!.novelUrl)
+        // The novel page url was discovered later (or changed): same chapter, same text, new novel url.
+        val moved = item(1).let { it.copy(novel = it.novel.copy(novelUrl = "https://x.example/new/1")) }
+        store.items[0] = moved
+        up.run()
+        assertEquals("https://x.example/new/1", api.uploads.single().novel.url)
+        assertEquals("https://x.example/new/1", store.recorded[1]!!.novelUrl)
     }
 }

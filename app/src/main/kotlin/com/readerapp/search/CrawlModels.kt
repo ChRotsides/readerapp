@@ -26,6 +26,7 @@ data class CrawlJob(
     val scope: String = CrawlRequest.SCOPE_NOVEL,
     @SerialName("chapters_per_novel") val chaptersPerNovel: Int? = null,
     val status: String = "queued",
+    @SerialName("stop_reason") val stopReason: String? = null,
     @SerialName("pages_fetched") val pagesFetched: Int = 0,
     @SerialName("novels_found") val novelsFound: Int = 0,
     @SerialName("chapters_embedded") val chaptersEmbedded: Int = 0,
@@ -36,7 +37,8 @@ data class CrawlJob(
     @SerialName("updated_at") val updatedAt: String = "",
 ) {
     val canPause: Boolean get() = status == "queued" || status == "running"
-    val canResume: Boolean get() = status == "paused" || status == "blocked" || status == "failed"
+    val canResume: Boolean get() = status == "paused" || status == "blocked" || status == "failed" ||
+        (status == "done" && stopReason == "legacy_completion")
     val canCancel: Boolean get() = status == "queued" || status == "running" || status == "paused" || status == "blocked"
 }
 

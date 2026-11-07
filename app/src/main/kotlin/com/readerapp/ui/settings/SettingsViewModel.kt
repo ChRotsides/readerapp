@@ -70,6 +70,9 @@ class SettingsViewModel @Inject constructor(
     fun setDownloadWholeOnAdd(on: Boolean) { viewModelScope.launch { librarySettings.setDownloadWholeOnAdd(on) } }
     fun setSearchPrefetchResults(n: Int) { viewModelScope.launch { librarySettings.setSearchPrefetchResults(n) } }
     fun setSearchPrefetchChapters(n: Int) { viewModelScope.launch { librarySettings.setSearchPrefetchChapters(n) } }
+    fun setSearchScenes(n: Int) { viewModelScope.launch { librarySettings.setSearchScenes(n) } }
+    fun setRerankPool(n: Int) { viewModelScope.launch { librarySettings.setRerankPool(n) } }
+    fun setReranker(value: String) { viewModelScope.launch { librarySettings.setReranker(value) } }
 
     val prefs: StateFlow<ReaderPrefs> = prefsRepo.prefs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ReaderPrefs())

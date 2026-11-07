@@ -109,6 +109,25 @@ fun SettingsScreen(onBack: () -> Unit, onOpenAdapters: () -> Unit, onOpenCrawl: 
                 "Add chapters I read to search", library.uploadChapters, viewModel::setUploadChapters,
                 "Sends the English text of chapters downloaded on this phone to your server's search index.",
             )
+            Text("Scenes Claude writes per search: ${library.searchScenes}", style = MaterialTheme.typography.labelLarge)
+            Slider(
+                value = library.searchScenes.toFloat(),
+                onValueChange = { viewModel.setSearchScenes(it.roundToInt()) },
+                valueRange = LibraryOptions.SCENES_RANGE.first.toFloat()..LibraryOptions.SCENES_RANGE.last.toFloat(),
+                steps = LibraryOptions.SCENES_RANGE.last - LibraryOptions.SCENES_RANGE.first - 1,
+            )
+            Text("Results reranked: top ${library.rerankPool}", style = MaterialTheme.typography.labelLarge)
+            Slider(
+                value = library.rerankPool.toFloat(),
+                onValueChange = { viewModel.setRerankPool((it / LibraryOptions.RERANK_STEP).roundToInt() * LibraryOptions.RERANK_STEP) },
+                valueRange = LibraryOptions.RERANK_RANGE.first.toFloat()..LibraryOptions.RERANK_RANGE.last.toFloat(),
+                steps = (LibraryOptions.RERANK_RANGE.last - LibraryOptions.RERANK_RANGE.first) / LibraryOptions.RERANK_STEP - 1,
+            )
+            Text("Reranker", style = MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(library.reranker == "jev", { viewModel.setReranker("jev") }, { Text("Jev") })
+                FilterChip(library.reranker == "claude", { viewModel.setReranker("claude") }, { Text("Claude") })
+            }
 
             HorizontalDivider()
             Text("Offline reading", style = MaterialTheme.typography.titleMedium)

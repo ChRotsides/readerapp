@@ -301,9 +301,9 @@ async def test_repair_requires_the_failing_page_itself_to_extract(maker, fake_ll
     s.remember("chapter", old_url, old_html)  # an earlier good page in the old layout
     url, html = chapter_page("v2")
     fake_llm.add("ChapterSection", ChapterSection(body="#content"))  # works on the remembered sample, not on the failing page
-    fake_llm.add("ChapterSection", ChapterSection(title="h1.ch-title", body="#story", drop=[".ads", ".share"]))
+    fake_llm.add("ChapterSection", ChapterSection(title="h1.ch-title", body="#content, #story", drop=[".ads", ".share"]))  # must keep the sample working too
     await s.repair("chapter", url, html, "empty")
-    assert len(fake_llm.calls) == 2 and s.sections["chapter"]["body"] == "#story"
+    assert len(fake_llm.calls) == 2 and s.sections["chapter"]["body"] == "#content, #story"
 
 
 async def test_quality_only_repair_failure_keeps_the_active_recipe(maker, fake_llm):

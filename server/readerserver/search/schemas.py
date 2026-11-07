@@ -1,6 +1,9 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+MAX_SCENES = 8
+MAX_RERANK_POOL = 100
 
 
 class SearchFilters(BaseModel):
@@ -14,7 +17,7 @@ class SearchFilters(BaseModel):
 
 class HydeOutput(BaseModel):
     filters: SearchFilters
-    scenes: list[str] = Field(description="2-3 distinct hypothetical scenes (setup / signature trope / tone)")
+    scenes: list[str] = Field(description="The requested number of distinct hypothetical scenes (setup / signature trope / tone / other characteristic moments)")
     synopsis: str = Field(description="Hypothetical NovelUpdates-style synopsis")
     tags: list[str] = Field(description="Hypothetical NovelUpdates-style tag list")
 
@@ -28,13 +31,39 @@ class RerankOutput(BaseModel):
     ranking: list[RerankItem] = Field(description="Best match first; only ids from the candidate list")
 
 
+class ReasonsOutput(BaseModel):
+    reasons: list[RerankItem] = Field(description="One reason per given candidate id")
+
+
 class SearchRequest(BaseModel):
     description: str
+    scene_count: int | None = Field(default=None, ge=1, le=MAX_SCENES, description="Scenes Claude writes (default: HYDE_SCENE_COUNT)")
+    rerank_pool: int | None = Field(default=None, ge=1, le=MAX_RERANK_POOL, description="Top candidates Claude reranks (default: RERANK_POOL)")
+    rerank_provider: Literal["jev", "claude"] | None = Field(default=None, description="Reranker (default: RERANK_PROVIDER)")
     filters: SearchFilters | None = None
     scenes: list[str] | None = None
     synopsis: str | None = None
     tags: list[str] | None = None
     limit: int = Field(default=20, ge=1, le=50)
+
+
+class SimilarRequest(BaseModel):
+    """Find novels similar to one the user reads (a library novel or a corpus work); exactly one seed is required."""
+    library_url: str | None = None
+    work_id: str | None = None
+    chapters: list[int] | None = Field(default=None, description="Seed chapter indexes (default: stored chapters < 5, else catalog samples)")
+    hide_library: bool = True
+    filters: SearchFilters | None = None
+    scene_count: int | None = Field(default=None, ge=1, le=MAX_SCENES)  # accepted for old clients; ignored (similar writes no scenes)
+    rerank_pool: int | None = Field(default=None, ge=1, le=MAX_RERANK_POOL)
+    rerank_provider: Literal["jev", "claude"] | None = None
+    limit: int = Field(default=20, ge=1, le=50)
+
+    @model_validator(mode="after")
+    def _one_seed(self):
+        if bool(self.library_url) == bool(self.work_id):
+            raise ValueError("exactly one of library_url / work_id is required")
+        return self
 
 
 class Rating(BaseModel):
@@ -67,12 +96,14 @@ class WorkOut(BaseModel):
     ratings: list[Rating] = []
     urls: list[SourceUrl] = []
     related: list[dict] = []
+    favorite: bool = False  # starred on this server (see api/favorites.py)
 
 
 class SearchResult(WorkOut):
     score: float
     reason: str = ""
     matched_scenes: int = 0
+    rerank_score: float | None = None  # Jev fit score normalized 0-1 (None when Claude or nothing reranked)
 
 
 class SearchResponse(BaseModel):
@@ -82,4 +113,7 @@ class SearchResponse(BaseModel):
     tags: list[str]
     filters: SearchFilters
     reranked: bool
+    rerank_provider_used: str | None = None  # jev | claude when `reranked`
     notes: list[str] = []
+    history_id: str | None = None  # id of the saved history entry (see api/searches.py)
+    seed_title: str | None = None  # /similar only: the novel the results are similar to

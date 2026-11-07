@@ -41,7 +41,11 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.readerapp.scrape.DomainRateLimiter
+import com.readerapp.favorites.FavoriteRef
+import com.readerapp.favorites.isFavorite
 import com.readerapp.search.Work
+import com.readerapp.ui.favorites.FavoriteStar
+import com.readerapp.ui.favorites.FavoritesViewModel
 
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
@@ -49,9 +53,12 @@ fun WorkScreen(
     onBack: () -> Unit,
     onOpenInBrowser: (String) -> Unit,
     onOpenNovel: (Long) -> Unit,
+    onMoreLikeThis: (String) -> Unit,
     viewModel: WorkViewModel = hiltViewModel(),
+    favoritesViewModel: FavoritesViewModel = hiltViewModel(),
 ) {
     val s by viewModel.state.collectAsStateWithLifecycle()
+    val favorites by favoritesViewModel.favorites.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     // The snackbar is shown from a screen-scoped coroutine (not the effect below): clearing the event changes the
     // effect's key and cancels it, so nothing suspending may run in the effect after eventHandled(). The event is
@@ -75,6 +82,12 @@ fun WorkScreen(
             TopAppBar(
                 title = { Text(s.work?.title ?: "Novel", maxLines = 1) },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                actions = {
+                    s.work?.let { w ->
+                        val ref = FavoriteRef.forWork(w)
+                        FavoriteStar(favorites.isFavorite(ref), { favoritesViewModel.toggle(ref) })
+                    }
+                },
             )
         },
     ) { padding ->
@@ -97,6 +110,7 @@ fun WorkScreen(
                         }
                     }
                 }
+                OutlinedButton(onClick = { onMoreLikeThis(work.workId) }) { Text("More like this") }
                 if (work.aliases.isNotEmpty()) Text("Also known as: " + work.aliases.joinToString(" / "), style = MaterialTheme.typography.bodySmall)
                 work.synopsis?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
                 if (work.tags.isNotEmpty() || work.genres.isNotEmpty()) {

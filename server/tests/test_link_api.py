@@ -13,7 +13,7 @@ from .linksite import SENTINEL, prose
 from .test_api import H, client
 
 JOB_KEYS = {"id", "url", "scope", "chapters_per_novel", "status", "pages_fetched", "novels_found", "chapters_embedded", "chapters_skipped",
-            "spend_usd", "error", "created_at", "updated_at"}
+            "spend_usd", "error", "stop_reason", "created_at", "updated_at"}
 
 
 async def test_every_new_route_needs_the_bearer_token(maker):

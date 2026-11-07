@@ -20,6 +20,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
@@ -49,6 +51,9 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.readerapp.data.db.NovelWithProgress
+import com.readerapp.favorites.FavoriteRef
+import com.readerapp.favorites.isFavorite
+import com.readerapp.ui.favorites.FavoritesViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -57,9 +62,13 @@ fun LibraryScreen(
     onOpenBrowser: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenDiscover: () -> Unit,
+    onFindSimilar: (Long) -> Unit,
     viewModel: LibraryViewModel = hiltViewModel(),
+    favoritesViewModel: FavoritesViewModel = hiltViewModel(),
 ) {
     val library by viewModel.library.collectAsStateWithLifecycle()
+    val favorites by favoritesViewModel.favorites.collectAsStateWithLifecycle()
+    var onlyFavorites by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<NovelWithProgress?>(null) }
 
     Scaffold(
@@ -68,6 +77,12 @@ fun LibraryScreen(
             TopAppBar(
                 title = { Text("Library") },
                 actions = {
+                    IconButton(onClick = { onlyFavorites = !onlyFavorites }) {
+                        Icon(
+                            if (onlyFavorites) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                            if (onlyFavorites) "Show all novels" else "Show only favorites",
+                        )
+                    }
                     IconButton(onClick = onOpenDiscover) { Icon(Icons.Filled.Search, "Discover novels") }
                     IconButton(onClick = onOpenSettings) { Icon(Icons.Filled.Settings, "Settings") }
                 },
@@ -77,12 +92,15 @@ fun LibraryScreen(
             FloatingActionButton(onClick = onOpenBrowser) { Icon(Icons.Filled.Add, "Add novel from browser") }
         },
     ) { padding ->
-        val items = library
+        val items = library?.let { all ->
+            if (onlyFavorites) all.filter { favorites.isFavorite(FavoriteRef.forNovel(it.novel)) } else all
+        }
         when {
             items == null -> Box(Modifier.fillMaxSize().padding(padding))
             items.isEmpty() -> Box(Modifier.fillMaxSize().padding(padding).padding(32.dp), contentAlignment = Alignment.Center) {
                 Text(
-                    "Your library is empty.\nTap + to open the browser, navigate to a chapter and choose \"Add to library\".",
+                    if (onlyFavorites) "None of the novels in your library is a favorite yet.\nTap the star on a novel's page, or long-press it here."
+                    else "Your library is empty.\nTap + to open the browser, navigate to a chapter and choose \"Add to library\".",
                     style = MaterialTheme.typography.bodyLarge,
                 )
             }
@@ -94,7 +112,12 @@ fun LibraryScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 items(items, key = { it.novel.id }) { item ->
-                    NovelCard(item, onClick = { onOpenNovel(item.novel.id) }, onDelete = { pendingDelete = item })
+                    val ref = FavoriteRef.forNovel(item.novel)
+                    NovelCard(
+                        item, isFavorite = favorites.isFavorite(ref), onClick = { onOpenNovel(item.novel.id) },
+                        onToggleFavorite = { favoritesViewModel.toggle(ref) }, onFindSimilar = { onFindSimilar(item.novel.id) },
+                        onDelete = { pendingDelete = item },
+                    )
                 }
             }
         }
@@ -115,7 +138,7 @@ fun LibraryScreen(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun NovelCard(item: NovelWithProgress, onClick: () -> Unit, onDelete: () -> Unit) {
+private fun NovelCard(item: NovelWithProgress, isFavorite: Boolean, onClick: () -> Unit, onToggleFavorite: () -> Unit, onFindSimilar: () -> Unit, onDelete: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     Card(modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = { menu = true })) {
         Column {
@@ -136,7 +159,23 @@ private fun NovelCard(item: NovelWithProgress, onClick: () -> Unit, onDelete: ()
                         )
                     }
                 }
+                if (isFavorite) {
+                    Icon(
+                        Icons.Filled.Star, "Favorite", tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
+                    )
+                }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(
+                        text = { Text(if (isFavorite) "Remove from favorites" else "Add to favorites") },
+                        leadingIcon = { Icon(if (isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder, null) },
+                        onClick = { menu = false; onToggleFavorite() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Find similar") },
+                        leadingIcon = { Icon(Icons.Filled.Search, null) },
+                        onClick = { menu = false; onFindSimilar() },
+                    )
                     DropdownMenuItem(
                         text = { Text("Delete") },
                         leadingIcon = { Icon(Icons.Filled.Delete, null) },

@@ -18,10 +18,16 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.outlined.StarBorder
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -36,6 +42,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,6 +50,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -50,7 +59,14 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.readerapp.favorites.FavoriteRef
+import com.readerapp.favorites.isFavorite
+import com.readerapp.data.db.SearchHistoryItem
+import com.readerapp.search.SimilarSeed
+import com.readerapp.search.SimilarStage
 import com.readerapp.search.Work
+import com.readerapp.ui.favorites.FavoriteStar
+import com.readerapp.ui.favorites.FavoritesViewModel
 
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
@@ -60,15 +76,47 @@ fun DiscoverScreen(
     onOpenNovel: (Long) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenCrawl: () -> Unit,
+    onOpenFavorites: () -> Unit,
+    /** Set when the screen was opened by "Find similar" / "More like this": that search starts right away. */
+    similarSeed: SimilarSeed? = null,
     viewModel: DiscoverViewModel = hiltViewModel(),
+    favoritesViewModel: FavoritesViewModel = hiltViewModel(),
 ) {
     val s by viewModel.state.collectAsStateWithLifecycle()
+    val favorites by favoritesViewModel.favorites.collectAsStateWithLifecycle()
+    var descriptionFocused by remember { mutableStateOf(false) }
+    var menuOpen by remember { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    LaunchedEffect(similarSeed) { similarSeed?.let(viewModel::findSimilar) }
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("Clear search history?") },
+            text = { Text("All saved searches and their results are removed from this phone and the server.") },
+            confirmButton = { TextButton(onClick = { confirmClear = false; viewModel.clearHistory() }) { Text("Clear") } },
+            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } },
+        )
+    }
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Discover") },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
-                actions = { IconButton(onClick = onOpenCrawl) { Icon(Icons.Filled.Public, "Crawl a link") } },
+                actions = {
+                    IconButton(onClick = onOpenFavorites) { Icon(Icons.Outlined.StarBorder, "Favorites") }
+                    IconButton(onClick = onOpenCrawl) { Icon(Icons.Filled.Public, "Crawl a link") }
+                    Box {
+                        IconButton(onClick = { menuOpen = true }) { Icon(Icons.Filled.MoreVert, "More") }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Clear history") },
+                                enabled = s.recent.isNotEmpty(),
+                                onClick = { menuOpen = false; confirmClear = true },
+                            )
+                        }
+                    }
+                },
             )
         },
     ) { padding ->
@@ -91,7 +139,7 @@ fun DiscoverScreen(
                             onValueChange = viewModel::setDescription,
                             label = { Text("Describe the novel you want") },
                             minLines = 3,
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth().onFocusChanged { descriptionFocused = it.isFocused },
                         )
                         Button(onClick = viewModel::search, enabled = !s.loading && s.description.isNotBlank()) { Text("Search") }
                     }
@@ -108,11 +156,33 @@ fun DiscoverScreen(
                     )
                 }
             }
+            val describing = s.mode == DiscoverMode.DESCRIBE
+            if (describing && descriptionFocused && s.suggestions.isNotEmpty()) {
+                item(key = "suggestions-title") { Text("Matching previous searches", style = MaterialTheme.typography.labelLarge) }
+                items(s.suggestions, key = { "suggestion-" + it.id }) { item ->
+                    HistoryRow(item, onClick = { focusManager.clearFocus(); viewModel.openSaved(item.id) }, onDelete = { viewModel.deleteSaved(item.id) })
+                }
+            }
+            val showRecent = describing && !s.loading && s.recent.isNotEmpty() && (s.description.isBlank() || (!descriptionFocused && s.results == null))
+            if (showRecent) {
+                item(key = "recent-title") { Text("Recent searches", style = MaterialTheme.typography.titleSmall) }
+                items(s.recent, key = { "recent-" + it.id }) { item ->
+                    HistoryRow(item, onClick = { focusManager.clearFocus(); viewModel.openSaved(item.id) }, onDelete = { viewModel.deleteSaved(item.id) })
+                }
+            }
             if (s.loading) item {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     LinearProgressIndicator(Modifier.fillMaxWidth())
                     Text(
-                        if (s.mode == DiscoverMode.DESCRIBE) "Writing imagined scenes, searching, ranking... (can take up to 40 s)" else "Searching...",
+                        when {
+                            s.stage == SimilarStage.PREPARING -> "Preparing chapters..."
+                            s.stage == SimilarStage.UPLOADING -> "Uploading..."
+                            s.stage == SimilarStage.UPLOADING_UNASKED ->
+                                "Uploading... \"Upload chapters\" is off in Settings; this novel's seed chapters are sent to your server for this search only."
+                            s.stage == SimilarStage.SEARCHING -> "Finding similar novels..."
+                            s.mode == DiscoverMode.DESCRIBE -> "Writing imagined scenes, searching, ranking... (can take up to 40 s)"
+                            else -> "Searching..."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -121,12 +191,33 @@ fun DiscoverScreen(
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(err, color = MaterialTheme.colorScheme.error)
-                        TextButton(onClick = onOpenSettings) { Text("Open settings") }
+                        Row {
+                            if (s.retrySimilar) TextButton(onClick = viewModel::retrySimilar) { Text("Retry") }
+                            TextButton(onClick = onOpenSettings) { Text("Open settings") }
+                        }
                     }
                 }
             }
-            s.query?.let { q ->
+            s.viewingSaved?.let { saved ->
+                item(key = "saved-banner") {
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Saved results from ${formatDate(saved.createdAt)}", style = MaterialTheme.typography.titleSmall)
+                            Text("Shown from this phone, no connection needed. Search again runs it afresh and saves a new entry.", style = MaterialTheme.typography.bodySmall)
+                            OutlinedButton(onClick = viewModel::searchSavedAgain, enabled = !s.loading) { Text("Search again") }
+                        }
+                    }
+                }
+            }
+            s.query?.takeIf { s.viewingSaved == null }?.let { q ->
                 item { SearchedFor(q, enabled = !s.loading, onEdit = viewModel::editQuery, onSearchAgain = viewModel::searchAgain) }
+            }
+            s.similarTitle?.takeIf { s.results != null && !s.loading }?.let { title ->
+                item(key = "similar-header") { Text(similarLabel(title), style = MaterialTheme.typography.titleMedium) }
+            }
+            val by = s.rerankedBy
+            if (s.reranked && by != null && s.results != null && !s.loading) item {
+                Text("Reranked by ${if (by == "jev") "Jev" else "Claude"}", style = MaterialTheme.typography.labelSmall)
             }
             if (s.notes.isNotEmpty()) item {
                 Text(s.notes.joinToString("\n"), style = MaterialTheme.typography.bodySmall)
@@ -135,12 +226,33 @@ fun DiscoverScreen(
             if (results != null && !s.loading) {
                 if (results.isEmpty()) item { Text("No matches.") }
                 items(results, key = { it.workId }) { work ->
-                    ResultCard(work, inLibraryId = s.inLibrary[work.workId], savedId = s.saved[work.workId], onClick = { onOpenWork(work.workId) }, onOpenNovel = onOpenNovel)
+                    val ref = FavoriteRef.forWork(work)
+                    ResultCard(
+                        work, inLibraryId = s.inLibrary[work.workId], savedId = s.saved[work.workId],
+                        isFavorite = favorites.isFavorite(ref), onToggleFavorite = { favoritesViewModel.toggle(ref) },
+                        onClick = { onOpenWork(work.workId) }, onOpenNovel = onOpenNovel,
+                    )
                 }
             }
         }
     }
 }
+
+@Composable
+private fun HistoryRow(item: SearchHistoryItem, onClick: () -> Unit, onDelete: () -> Unit) {
+    Card(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
+        Row(Modifier.padding(start = 12.dp, top = 4.dp, bottom = 4.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(item.description, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+                val results = if (item.resultCount == 1) "1 result" else "${item.resultCount} results"
+                Text("${formatDate(item.createdAt)} \u00b7 $results", style = MaterialTheme.typography.labelSmall)
+            }
+            IconButton(onClick = onDelete) { Icon(Icons.Filled.Delete, "Delete this search") }
+        }
+    }
+}
+
+internal fun formatDate(epochMs: Long): String = java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM).format(java.util.Date(epochMs))
 
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
@@ -189,13 +301,19 @@ private fun SearchedFor(q: EditableQuery, enabled: Boolean, onEdit: (EditableQue
 
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-private fun ResultCard(work: Work, inLibraryId: Long?, savedId: Long?, onClick: () -> Unit, onOpenNovel: (Long) -> Unit) {
+private fun ResultCard(
+    work: Work, inLibraryId: Long?, savedId: Long?, isFavorite: Boolean, onToggleFavorite: () -> Unit,
+    onClick: () -> Unit, onOpenNovel: (Long) -> Unit,
+) {
     var aliasesOpen by remember { mutableStateOf(false) }
     Card(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
         Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Cover(work.coverUrl, work.title, Modifier.width(80.dp).height(120.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(work.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.Top) {
+                    Text(work.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    FavoriteStar(isFavorite, onToggleFavorite, Modifier.size(32.dp))
+                }
                 if (inLibraryId != null) {
                     AssistChip(onClick = { onOpenNovel(inLibraryId) }, label = { Text("In library") })
                 } else if (savedId != null) {

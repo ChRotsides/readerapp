@@ -378,7 +378,7 @@ interface UploadedChapterDao {
 
     /**
      * Downloaded chapters of library novels that were never uploaded, whose text was written after the last upload
-     * read, or whose position/title/URL changed since. Only a hint: the uploader compares content hashes before sending.
+     * read, or whose position/title/URL or the novel's URL changed since. Only a hint: the uploader compares content hashes before sending.
      */
     @Query(
         """
@@ -388,9 +388,59 @@ interface UploadedChapterDao {
         WHERE n.inLibrary = 1 AND c.status = 'FETCHED'
           AND (u.chapterId IS NULL
                OR u.chapterIndex != c.chapterIndex OR u.title != c.title OR u.url != c.url
+               OR u.novelUrl != COALESCE(n.novelUrl, n.sourceUrl)
                OR u.uploadedAt < (SELECT MAX(t.createdAt) FROM chapter_texts t WHERE t.chapterId = c.id))
         ORDER BY c.novelId, c.chapterIndex, c.id
         """,
     )
     suspend fun pendingChapterIds(): List<Long>
+}
+
+@Dao
+interface FavoriteDao {
+    @Query("SELECT * FROM favorites WHERE favorite = 1 ORDER BY changedAt DESC")
+    fun observeLive(): Flow<List<Favorite>>
+
+    @Query("SELECT * FROM favorites")
+    suspend fun all(): List<Favorite>
+
+    @Query("SELECT * FROM favorites WHERE `key` = :key")
+    suspend fun get(key: String): Favorite?
+
+    @Query("SELECT * FROM favorites WHERE pendingSync = 1 ORDER BY changedAt")
+    suspend fun pending(): List<Favorite>
+
+    /** Changes (0 when nothing is pending) whenever a local toggle is waiting for the server; drives the debounced sync. */
+    @Query("SELECT COALESCE(MAX(changedAt), 0) FROM favorites WHERE pendingSync = 1")
+    fun observePendingStamp(): Flow<Long>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(favorite: Favorite)
+}
+
+@Dao
+interface SearchHistoryDao {
+    @Query("SELECT id, description, createdAt, resultCount, resultsJson IS NOT NULL AS hasResults FROM search_history WHERE deleted = 0 ORDER BY createdAt DESC")
+    fun observeLive(): Flow<List<SearchHistoryItem>>
+
+    @Query("SELECT * FROM search_history WHERE id = :id")
+    suspend fun get(id: String): SearchHistoryEntry?
+
+    @Query("SELECT id FROM search_history WHERE deleted = 1")
+    suspend fun pendingDeletes(): List<String>
+
+    @Query("SELECT id FROM search_history WHERE deleted = 0 AND resultsJson IS NULL ORDER BY createdAt DESC LIMIT :limit")
+    suspend fun idsMissingResults(limit: Int): List<String>
+
+    @Query("UPDATE search_history SET deleted = 1 WHERE id = :id")
+    suspend fun markDeleted(id: String)
+
+    @Query("UPDATE search_history SET deleted = 1")
+    suspend fun markAllDeleted()
+
+    @Query("DELETE FROM search_history WHERE id = :id")
+    suspend fun remove(id: String)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entry: SearchHistoryEntry)
 }

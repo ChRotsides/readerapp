@@ -176,3 +176,29 @@ async def test_title_search_and_work_detail_via_api(maker, corpus, fake_embedder
         s = await c.post("/search", json={"description": "dragon cook", "limit": 2})
         assert s.status_code == 200 and len(s.json()["results"]) == 2
         assert set(s.json()) >= {"results", "scenes", "synopsis", "tags", "filters", "reranked"}
+
+
+async def test_scene_count_and_rerank_pool_are_adjustable(maker, corpus, fake_embedder, fake_llm):
+    import json
+
+    # Settings defaults: the prompt asks for HYDE_SCENE_COUNT scenes and Claude reranks up to RERANK_POOL candidates.
+    cfg = corpus.model_copy(update={"hyde_scene_count": 2, "rerank_pool": 2})
+    fake_llm.add("HydeOutput", hyde())
+    fake_llm.add("RerankOutput", RerankOutput(ranking=[]))
+    res = await run(maker, cfg, fake_embedder, fake_llm, SearchRequest(description="a cook who befriends a dragon", limit=1))
+    hyde_call, rerank_call = fake_llm.calls
+    assert "exactly 2 DISTINCT" in hyde_call["system"] and len(res.scenes) == 2
+    assert len(json.loads(rerank_call["user"])["candidates"]) == 2
+
+    # A request's own values override the settings.
+    fake_llm.calls.clear()
+    fake_llm.add("HydeOutput", hyde())
+    fake_llm.add("RerankOutput", RerankOutput(ranking=[]))
+    res = await run(maker, cfg, fake_embedder, fake_llm,
+                    SearchRequest(description="a cook who befriends a dragon", limit=1, scene_count=1, rerank_pool=3))
+    hyde_call, rerank_call = fake_llm.calls
+    assert "exactly 1 DISTINCT" in hyde_call["system"] and len(res.scenes) == 1
+    assert len(json.loads(rerank_call["user"])["candidates"]) == 3
+
+    # The pool is never smaller than the number of results asked for.
+    assert SearchService(cfg, fake_embedder, fake_llm).rerank_pool(SearchRequest(description="x", limit=10, rerank_pool=3)) == 10

@@ -37,6 +37,9 @@ class Site:
         self.paywall: set[tuple[int, int]] = set()  # chapter pages replaced by a lock page with no chapter container
         self.dup = False  # listing page 2 repeats novel 1
         self.missing: set[str] = set()  # paths that 404
+        self.empty: set[tuple[int, int]] = set()  # chapter pages whose body container exists but holds nothing (illustrations-only)
+        self.lists: dict[str, dict[int, list[int]]] = {"/list-a": {1: [1, 2]}, "/list-b": {1: [1, 2, 3], 2: [4]}, "/list-c": {1: [1, 2], 2: [3]}}  # extra listings
+        self.toc2_empty = False  # novel 1's second chapter-list page shows no chapter links
 
     def count(self, path: str) -> int:
         return self.requests.count(path)
@@ -60,6 +63,11 @@ class Site:
             items = "".join(f'<li><a href="/novel/{i}">{TITLES[i]}</a></li>' for i in ids)
             nxt = '<a class="next" href="/list?page=2">Next</a>' if page == 1 else ""
             return f'<html><head><title>Novels {page}</title><script>var x=1</script></head><body><nav><a href="/">Home</a><a href="/login">Login</a></nav><ul class="novels">{items}</ul>{nxt}</body></html>'
+        if path in self.lists:
+            pages = self.lists[path]
+            items = "".join(f'<li><a href="/novel/{i}">{TITLES[i]}</a></li>' for i in pages.get(page, []))
+            nxt = f'<a class="next" href="{path}?page={page + 1}">Next</a>' if page + 1 in pages else ""
+            return f'<html><head><title>Novels {page}</title></head><body><nav><a href="/">Home</a></nav><ul class="novels">{items}</ul>{nxt}</body></html>'
         if m := re.fullmatch(r"/novel/(\d+)", path):
             n = int(m.group(1))
             if n not in TITLES:
@@ -75,8 +83,10 @@ class Site:
             ks = list(range(1, CHAPTERS[n] + 1))
             if n == 1:  # the chapter list of novel 1 is paginated: 3 + 2
                 ks = ks[:3] if page == 1 else ks[3:]
+            if n == 1 and page == 2 and self.toc2_empty:
+                ks = []
             items = "".join(f'<li><a href="/novel/{n}/chapter/{k}">Chapter {k}</a></li>' for k in ks)
-            nxt = f'<a class="next" href="/novel/{n}/chapters?page=2">Next page</a>' if n == 1 and page == 1 else ""
+            nxt = f'<a class="next" href="/novel/{n}/chapters?page=2">Next page</a>' if n == 1 and page == 1 and CHAPTERS[1] > 3 else ""
             return f'<html><body><a class="crumb" href="/novel/{n}">{TITLES[n]}</a><ul class="chapters">{items}</ul>{nxt}</body></html>'
         if m := re.fullmatch(r"/novel/(\d+)/chapter/(\d+)", path):
             n, k = int(m.group(1)), int(m.group(2))
@@ -85,12 +95,15 @@ class Site:
             if (n, k) in self.paywall:
                 return '<html><body><a class="crumb" href="/novel/%d">x</a><h1>Chapter %d</h1><div class="lock">This chapter is locked. Subscribe to read.</div></body></html>' % (n, k)
             paras = ["This chapter is locked. Subscribe to read."] if (n, k) in self.locked else prose(n, k, self.edits.get((n, k), ""))
+            empty = (n, k) in self.empty
+            if empty:
+                paras = []
             body = "".join(f"<p>{p}</p>" for p in paras)
             container = "content" if self.layout == "v1" else "story"
             crumb = f'<a class="crumb" href="/novel/{n}">{TITLES[n]}</a>' if self.crumbs else ""
             return (f'<html><head><title>Chapter {k}</title></head><body><div class="nav">{crumb}<a href="/novel/{n}/chapter/{k + 1}">Next chapter</a></div>'
-                    f'<h1 class="ch-title">Chapter {k}</h1><div id="{container}">{body}<p class="ads">Advertisement: buy now</p>'
-                    f'<p class="share">Share on social media</p></div></body></html>')
+                    f'<h1 class="ch-title">Chapter {k}</h1><div id="{container}">{body}'
+                    + ("" if empty else '<p class="ads">Advertisement: buy now</p><p class="share">Share on social media</p>') + '</div></body></html>')
         if path == "/about":
             return "<html><head><title>About us</title></head><body><p>We are a small translation group. Contact us.</p></body></html>"
         return None

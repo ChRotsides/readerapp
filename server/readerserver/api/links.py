@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..ai.embeddings import EmbeddingRateLimited
@@ -14,7 +14,7 @@ from ..ai.spend import BudgetExceeded
 from ..crawl.runner import upsert_record
 from ..linkcrawl.chapters import embed_chapter_text
 from ..linkcrawl.crawler import domain_of, source_id_for
-from ..models import LinkCrawlJob
+from ..models import LinkCrawlJob, SourceRecord
 from ..sources.base import SourceRecordData
 
 MAX_LIBRARY_CHAPTERS = 50
@@ -33,6 +33,7 @@ class JobOut(BaseModel):
     scope: str
     chapters_per_novel: int | None
     status: str
+    stop_reason: str | None
     pages_fetched: int
     novels_found: int
     chapters_embedded: int
@@ -120,6 +121,10 @@ def register(app: FastAPI, svc, session, auth: list) -> None:
         job.status, job.updated_at = to, datetime.now(UTC)
         if to == "queued":
             job.error, job.next_eligible_at = None, None
+            job.stop_reason = None
+        elif to in ("paused", "cancelled"):
+            job.stop_reason = "manual_pause" if to == "paused" else "user_cancelled"
+            job.error = None
         await s.commit()
         return job
 
@@ -129,9 +134,19 @@ def register(app: FastAPI, svc, session, auth: list) -> None:
 
     @app.post("/crawl-jobs/{job_id}/resume", response_model=JobOut, dependencies=auth)
     async def resume_job(job_id: int, s: AsyncSession = Depends(session)):
-        job = await get_job(s, job_id)
+        job = await get_job(s, job_id, lock=True)
         if job.status in ("queued", "running"):
             return job  # already going
+        if job.status == "done" and job.scope == "site" and job.stop_reason in (None, "legacy_completion") and not job.checkpoint:
+            completed = await s.scalar(select(exists().where(
+                SourceRecord.source == "link", SourceRecord.raw["job_id"].as_integer() == job.id,
+            )))
+            if not completed:
+                raise HTTPException(409, "no saved novel records are available to recover this completed crawl")
+            # The old worker deleted its checkpoint. Rescan listings only, skipping
+            # this job's already processed novels by stable source ID.
+            job.checkpoint = {"recover_completed": True}
+            return await transition(s, job_id, ("done",), "queued")
         return await transition(s, job_id, ("paused", "blocked", "failed"), "queued")
 
     @app.post("/crawl-jobs/{job_id}/cancel", response_model=JobOut, dependencies=auth)

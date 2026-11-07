@@ -8,6 +8,8 @@ import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Bundle
 import android.os.PowerManager
+import android.util.Log
+import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.media3.common.AudioAttributes
@@ -70,6 +72,8 @@ class TtsService : MediaSessionService() {
     private var voice = TtsConfig.DEFAULT_VOICE
     private var speed = TtsConfig.DEFAULT_SPEED
     private var sleepJob: Job? = null
+    /** Set while we stop the player ourselves, so the IDLE it reports is not mistaken for an external stop. */
+    private var stopping = false
 
     private val sink = object : PlaylistSink {
         override suspend fun append(item: ReadyItem) = withContext(Dispatchers.Main.immediate) {
@@ -301,7 +305,9 @@ class TtsService : MediaSessionService() {
     private fun stopReading() {
         sleepJob?.cancel()
         pipeline.stop()
+        stopping = true
         player.stop()
+        stopping = false
         releaseWindow()
         controller.reset()
         releaseWakeLock()
@@ -378,6 +384,15 @@ class TtsService : MediaSessionService() {
         }
 
         override fun onPlaybackStateChanged(state: Int) {
+            Log.i(TAG, "player state=$state idx=${player.currentMediaItemIndex} items=${items.size} done=${pipeline.done.value}")
+            if (state == Player.STATE_IDLE && !stopping && controller.state.value.active && items.isNotEmpty()) {
+                // Something outside the app stopped the player (e.g. Samsung drops the media notification when the
+                // screen dozes, and its dismiss action is a STOP media button). Reading is still on: re-prepare,
+                // otherwise generation keeps queueing audio that never plays.
+                Log.w(TAG, "player stopped externally; re-preparing")
+                player.prepare()
+                return
+            }
             if (state != Player.STATE_ENDED) return
             val next = player.currentMediaItemIndex + 1
             when {
@@ -407,6 +422,19 @@ class TtsService : MediaSessionService() {
                 .build()
         }
 
+        override fun onPlayerCommandRequest(session: MediaSession, controller: MediaSession.ControllerInfo, playerCommand: Int): Int {
+            if (playerCommand != Player.COMMAND_STOP) return super.onPlayerCommandRequest(session, controller, playerCommand)
+            return rejectStop("command from ${controller.packageName}")
+        }
+
+        override fun onMediaButtonEvent(session: MediaSession, controllerInfo: MediaSession.ControllerInfo, intent: Intent): Boolean {
+            @Suppress("DEPRECATION")
+            val key = intent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+            if (key?.keyCode != KeyEvent.KEYCODE_MEDIA_STOP) return super.onMediaButtonEvent(session, controllerInfo, intent)
+            if (key.action == KeyEvent.ACTION_DOWN) rejectStop("media button from ${controllerInfo.packageName}")
+            return true
+        }
+
         override fun onCustomCommand(
             session: MediaSession,
             controller: MediaSession.ControllerInfo,
@@ -416,6 +444,17 @@ class TtsService : MediaSessionService() {
             if (customCommand.customAction == ACTION_NEXT_CHAPTER) nextChapter()
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
         }
+    }
+
+    /**
+     * External STOP requests (the media notification's dismiss action, Bluetooth/watch stop buttons) never put the
+     * player into IDLE behind our back. While reading they are ignored: the system sends one when it drops the
+     * notification on screen doze. While paused they end the reading session properly.
+     */
+    private fun rejectStop(source: String): Int {
+        Log.i(TAG, "external stop ($source), playWhenReady=${player.playWhenReady}")
+        if (!player.playWhenReady) scope.launch { stopReading() }
+        return SessionResult.RESULT_ERROR_NOT_SUPPORTED
     }
 
     private fun nextChapterButton(): CommandButton =
@@ -454,6 +493,7 @@ class TtsService : MediaSessionService() {
     }
 
     private companion object {
+        const val TAG = "ReaderTts"
         const val CHANNEL_ID = "tts_playback"
         const val NOTIFICATION_ID = 4100
         const val ACTION_NEXT_CHAPTER = "readerapp.tts.NEXT_CHAPTER"

@@ -89,6 +89,8 @@ class CrawlApiTest {
         assertFalse(job("done").canResume || job("cancelled").canResume)
         assertTrue(job("paused").canCancel && job("running").canCancel && job("queued").canCancel && job("blocked").canCancel)
         assertFalse(job("done").canCancel || job("failed").canCancel || job("cancelled").canCancel)
+        assertTrue(CrawlJob(id = 1, scope = "site", status = "done", stopReason = "legacy_completion").canResume)
+        assertFalse(CrawlJob(id = 1, scope = "site", status = "done", stopReason = "catalog_exhausted").canResume)
     }
 
     @Test fun libraryUploadPostsBodyAndParsesResult() = runTest {

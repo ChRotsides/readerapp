@@ -122,6 +122,8 @@ data class UploadedChapter(
     val chapterIndex: Int,
     val title: String,
     val url: String,
+    /** The novel url the chapter was uploaded under (`novel.url`); a later change makes the chapter pending again. */
+    @ColumnInfo(defaultValue = "''") val novelUrl: String = "",
 ) {
     companion object {
         /** Marks content the server permanently rejected (422); skipped until the content changes. */
@@ -247,4 +249,55 @@ data class AiUsage(
     val inputTokens: Long,
     val outputTokens: Long,
     val costMicros: Long,
+)
+
+/**
+ * A starred novel, mirrored with the discovery server's `favorites` table (see [com.readerapp.favorites.FavoriteSync]).
+ * [key] is `work:<work_id>` or `url:<normalized novel url>` ([com.readerapp.favorites.FavoriteKeys]); the star may sit on
+ * a novel that is not in the library, so there is no foreign key to [Novel].
+ */
+@Entity(tableName = "favorites")
+data class Favorite(
+    @PrimaryKey val key: String,
+    val workId: String? = null,
+    val novelUrl: String? = null,
+    val title: String,
+    val author: String? = null,
+    val coverUrl: String? = null,
+    val domain: String? = null,
+    /** False = a tombstone (un-starred); kept so the deletion syncs. */
+    val favorite: Boolean = true,
+    /** Epoch ms of the last change (device or server-confirmed); the later change wins when device and server differ. */
+    val changedAt: Long,
+    /** A change the server has not confirmed yet. */
+    @ColumnInfo(defaultValue = "0") val pendingSync: Boolean = false,
+)
+
+/**
+ * A saved discovery search, mirrored with the server's `search_history` table (see [com.readerapp.search.history.SearchHistorySync]).
+ * [resultsJson] is the ranked works as the server returned them; null until the full entry has been fetched, so the list can be
+ * shown from a pull alone. [deleted] is a local tombstone: hidden at once, removed after the server confirmed the delete.
+ */
+@Entity(tableName = "search_history")
+data class SearchHistoryEntry(
+    @PrimaryKey val id: String,
+    val description: String,
+    /** Epoch ms. */
+    val createdAt: Long,
+    val resultCount: Int,
+    /** The SearchRequest as sent. */
+    val requestJson: String = "{}",
+    /** A [com.readerapp.search.SearchBundle]: scenes, synopsis, tags, filters, reranked, notes. */
+    val bundleJson: String = "{}",
+    val resultsJson: String? = null,
+    @ColumnInfo(defaultValue = "0") val deleted: Boolean = false,
+)
+
+/** [SearchHistoryEntry] without the heavy JSON, for list rows. */
+data class SearchHistoryItem(
+    val id: String,
+    val description: String,
+    val createdAt: Long,
+    val resultCount: Int,
+    val hasResults: Boolean,
 )

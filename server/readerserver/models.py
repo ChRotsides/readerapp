@@ -253,6 +253,13 @@ class SampleEmbedding(Base):
             postgresql_using="hnsw",
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
+        Index(
+            "ix_sample_embeddings_early_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_where=text("chapter_index IS NULL OR chapter_index < 10"),
+        ),
     )
 
 
@@ -290,7 +297,7 @@ class AiUsage(Base):
     purpose: Mapped[str] = mapped_column(String(40))
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), default=0)
+    cost_usd: Mapped[float] = mapped_column(Numeric(18, 12), default=0)
     __table_args__ = (Index("ix_ai_usage_ts", "ts"),)
 
 
@@ -301,7 +308,7 @@ class SpendReservation(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    amount_usd: Mapped[float] = mapped_column(Numeric(12, 6), default=0)
+    amount_usd: Mapped[float] = mapped_column(Numeric(18, 12), default=0)
     purpose: Mapped[str] = mapped_column(String(40), default="")
 
 
@@ -333,6 +340,7 @@ class LinkCrawlJob(Base):
     scope: Mapped[str] = mapped_column(String(10))  # novel | site
     chapters_per_novel: Mapped[int | None] = mapped_column(Integer)  # NULL = all chapters
     status: Mapped[str] = mapped_column(String(10), default="queued")  # queued|running|paused|done|failed|cancelled|blocked
+    stop_reason: Mapped[str | None] = mapped_column(String(40))
     pages_fetched: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     novels_found: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     chapters_embedded: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
@@ -347,3 +355,40 @@ class LinkCrawlJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now(), onupdate=_now())
     __table_args__ = (Index("ix_link_crawl_jobs_status", "status"), Index("ix_link_crawl_jobs_domain", "domain"))
+
+
+class Favorite(Base):
+    """A starred novel, synced with the phone. Deleting is a tombstone (deleted_at) so other devices learn about it.
+    `changed_at` is the client's clock (last-write-wins); `updated_at` is the server's clock (the `since` pull cursor)."""
+
+    __tablename__ = "favorites"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    key: Mapped[str] = mapped_column(String(2100), unique=True)  # work:<work_id> | url:<normalized novel url>
+    work_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("works.id", ondelete="SET NULL"))
+    novel_url: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(Text)
+    author: Mapped[str | None] = mapped_column(Text)
+    cover_url: Mapped[str | None] = mapped_column(Text)
+    domain: Mapped[str | None] = mapped_column(String(255))
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_favorites_updated", "updated_at"), Index("ix_favorites_work", "work_id"))
+
+
+class SearchHistory(Base):
+    """One saved discovery search (request, generated hypotheticals, results), synced with the phone. Deleting is a
+    tombstone (deleted_at); `updated_at` is the `since` pull cursor."""
+
+    __tablename__ = "search_history"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    description: Mapped[str] = mapped_column(Text)
+    request: Mapped[dict] = mapped_column(JSONB)  # the SearchRequest as sent
+    scenes: Mapped[dict] = mapped_column(JSONB)  # what was generated/used: scenes, synopsis, tags, filters, reranked, notes
+    results: Mapped[list] = mapped_column(JSONB)  # SearchResult dicts in display order (score, reason, matched_scenes + work fields)
+    result_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_now())
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_search_history_created", "created_at"), Index("ix_search_history_updated", "updated_at"))

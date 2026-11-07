@@ -46,6 +46,10 @@ async def link_loop(crawler: LinkCrawler, poll_seconds: float = 10.0) -> None:
             await crawler.run_due()
         except Exception:
             log.exception("link crawl iteration failed")
+        try:
+            await crawler.schedule_refresh()
+        except Exception:
+            log.exception("link refresh scheduling failed")
         await asyncio.sleep(poll_seconds)
 
 

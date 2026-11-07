@@ -13,10 +13,13 @@ from ..config import Settings, get_settings
 from ..models import CrawlState, SourceRecord, Work, WorkLink
 from ..resolution.resolver import seed_tags, unlink_record
 from ..search.pipeline import BudgetError, SearchService
-from ..search.schemas import SearchRequest, SearchResponse, WorkOut
+from ..search.schemas import SearchRequest, SearchResponse, SimilarRequest, WorkOut
+from ..search.similar import SeedNotEmbedded, SeedNotFound, similar
 from ..services import Services, build_services, source_names
 from ..works import load_works, title_search
+from .favorites import register as register_favorite_routes
 from .links import register as register_link_routes
+from .searches import register as register_search_routes, save_search
 
 log = logging.getLogger(__name__)
 bearer = HTTPBearer(auto_error=False)
@@ -67,15 +70,36 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
             raise HTTPException(503, "VOYAGE_API_KEY is not configured")
         if sv.llm is None and not (req.scenes and req.synopsis):
             raise HTTPException(503, "ANTHROPIC_API_KEY is not configured")
-        service = SearchService(sv.settings, sv.embedder, sv.llm)  # type: ignore[arg-type]
+        service = SearchService(sv.settings, sv.embedder, sv.llm, sv.jev)  # type: ignore[arg-type]
         try:
-            return await service.search(s, req)
+            res = await service.search(s, req)
         except (BudgetError, BudgetExceeded) as e:
             raise HTTPException(402, f"monthly AI budget reached: {e}") from e
         except EmbeddingRateLimited as e:
             raise HTTPException(429, "Voyage embedding rate limit reached. Without a payment method on the Voyage "
                                      "account it allows only 3 requests/minute; add one at dashboard.voyageai.com, "
                                      "or try again in a minute.") from e
+        res.history_id = await save_search(s, req, res)
+        return res
+
+    @app.post("/similar", response_model=SearchResponse, dependencies=auth)
+    async def find_similar(req: SimilarRequest, request: Request, s: AsyncSession = Depends(session)):
+        sv = svc(request)
+        if sv.embedder is None:
+            raise HTTPException(503, "VOYAGE_API_KEY is not configured")
+        service = SearchService(sv.settings, sv.embedder, sv.llm, sv.jev)  # type: ignore[arg-type]
+        try:
+            res = await similar(service, s, req)
+        except SeedNotFound as e:
+            raise HTTPException(404, str(e)) from e
+        except SeedNotEmbedded as e:
+            raise HTTPException(409, str(e)) from e
+        except (BudgetError, BudgetExceeded) as e:
+            raise HTTPException(402, f"monthly AI budget reached: {e}") from e
+        except EmbeddingRateLimited as e:
+            raise HTTPException(429, "Voyage embedding rate limit reached; try again in a minute.") from e
+        res.history_id = await save_search(s, req, res, f"Similar to {res.seed_title}")
+        return res
 
     @app.get("/works/{work_id}", response_model=WorkOut, dependencies=auth)
     async def get_work(work_id: str, s: AsyncSession = Depends(session)):
@@ -160,6 +184,8 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
         return await svc(request).spend.summary()
 
     register_link_routes(app, svc, session, auth)
+    register_favorite_routes(app, svc, session, auth)
+    register_search_routes(app, svc, session, auth)
     return app
 
 

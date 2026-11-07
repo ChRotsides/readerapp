@@ -71,6 +71,27 @@ pipeline: synopsis embeddings -> entity resolution -> profile embeddings. Re-cra
 
 ### Crawler safety
 
+Link crawls default to at most **50,000 novels** and **5,000 listing pages** per job, configurable with
+`LINK_MAX_NOVELS` and `LINK_MAX_LISTING_PAGES`. Hitting either guard pauses the job, preserves all remaining links
+(including an unfinished listing page), and reports `novel_limit` or `listing_page_limit` in `stop_reason`.
+The chapter-list guard similarly reports `toc_page_limit`. Raise the applicable limit and use
+`POST /crawl-jobs/{id}/resume` to continue. Budget stops, provider deferrals, blocking, pagination loops, failures,
+manual pauses and cancellations also report a distinct `stop_reason`; `error` contains the explanation.
+Site jobs skip novels an earlier job already completed (the stored record carries `raw.crawl` with the job's
+`chapters_per_novel` and `completed_at`; an earlier crawl covers a job only if its limit is unlimited or at least as large).
+A record crawled before markers existed counts only if its `raw.job_id` job covers the new one and it has a stored chapter
+embedding. Listings are always paged to the end; skipped novels are counted in the job checkpoint (`known_skipped`).
+Single-novel jobs never skip.
+
+Recurring refresh is off by default. Set `LINK_REFRESH_URLS` (comma-separated listing URLs) and the worker queues a site
+job per URL, with `LINK_REFRESH_CHAPTERS_PER_NOVEL` (default 3), unless a job for that URL is queued, running, paused or
+blocked, or one was updated within `LINK_REFRESH_HOURS` (default 24; this also spaces out retries after a failed job).
+
+`done` now means `catalog_exhausted` or `novel_complete`, and checkpoints are retained even on completion.
+Old completed site jobs whose checkpoint was discarded are marked `legacy_completion`. Resuming one reconstructs
+the processed IDs from that job's stored novel records, rescans listing pages, and skips the processed novels without
+fetching their chapters or regenerating embeddings. A new job is required to refresh an explicitly exhausted catalog.
+
 `PoliteClient` follows redirects manually (max 5 hops); every hop is checked against the source's host allowlist
 (`services.SOURCE_HOSTS`), resolved and rejected if private/loopback/link-local/CGNAT (100.64/10, Tailscale)/unique-local,
 then robots-checked and rate-limited. robots.txt follows RFC 9309 (2xx parsed; 4xx except 429 = allow all; 5xx/429/network
@@ -148,7 +169,11 @@ vector columns; GIN trigram index on titles.
 (per `usage.iterations` attempt at each serving model's price incl. cache tokens) or released on failure; stale
 reservations expire after 15 min. Embedding stops (indexing is deferred, searches get HTTP 402) when the cap is reached; rerank degrades
 gracefully. Prices used: Claude Sonnet 5.5 $2/$10 and Haiku 5.5 $0.10/$0.50 per 1M tokens; Voyage
-`VOYAGE_PRICE_PER_MTOK` (default 0.12, an estimate - adjust) and `JEV_PRICE_PER_CALL` (default 0.002, an estimate).
+`VOYAGE_PRICE_PER_MTOK` (default 0.12, an estimate - adjust). Jev uses its API-reported billable input tokens at
+`JEV_PRICE_PER_MTOK_INPUT=0.042` USD per million ([published pricing](https://docs.typesafe.ai/models)); output is free,
+with no fixed per-call fee. Both choice and score requests use this rate. The obsolete `JEV_PRICE_PER_CALL` setting is
+ignored. Usage costs retain 12 decimal places so small Jev calls accumulate correctly. Migration `c9f3a5b8e124`
+recalculates historical Jev 1.13/1.14 costs from saved input usage and refreshes crawl-job spending totals.
 A search costs roughly one Haiku call + one Sonnet rerank + one small embedding call. Large first crawls cost mostly
 Voyage tokens (synopsis + profile per work): crawl one source at a time and watch `/admin/crawl`.
 Sonnet calls use server-side fallback (`server-side-fallback-2026-07-01`, `fallbacks: "default"`); fallback-model billing

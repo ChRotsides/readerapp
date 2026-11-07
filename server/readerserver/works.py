@@ -4,6 +4,7 @@ import uuid
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .api.favorites import favorite_work_ids
 from .models import SourceRecord, Work, WorkLink, WorkRelation
 from .resolution.merge import prio, ratings_for
 from .search.schemas import Rating, SourceUrl, WorkOut
@@ -28,6 +29,7 @@ async def load_works(session: AsyncSession, ids: list[uuid.UUID]) -> dict[uuid.U
     rels: dict[uuid.UUID, list[dict]] = {}
     for wid, rid, rtype, title in rel_rows:
         rels.setdefault(wid, []).append({"work_id": str(rid), "relation": rtype, "title": title})
+    starred = await favorite_work_ids(session, ids)
     out: dict[uuid.UUID, WorkOut] = {}
     for wid, w in works.items():
         recs = sorted(by_work.get(wid, []), key=lambda r: prio(r.source))
@@ -38,7 +40,7 @@ async def load_works(session: AsyncSession, ids: list[uuid.UUID]) -> dict[uuid.U
             start_year=w.start_year,
             ratings=[Rating(**r) for r in ratings_for(recs)],
             urls=[SourceUrl(source=r.source, url=r.url) for r in recs if r.url],
-            related=rels.get(wid, []),
+            related=rels.get(wid, []), favorite=wid in starred,
         )
     return out
 

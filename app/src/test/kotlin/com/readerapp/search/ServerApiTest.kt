@@ -31,22 +31,25 @@ class ServerApiTest {
         "urls":[{"source":"webnovel","url":"https://www.webnovel.com/book/1"}],"related":[{"kind":"sequel"}]}"""
 
     @Test fun searchParsesResponseAndSendsBearerAndBody() = runTest {
-        server.enqueue(MockResponse().setBody("""{"results":[${workJson.dropLast(1)},"score":0.8,"reason":"fits","matched_scenes":2}],
+        server.enqueue(MockResponse().setBody("""{"results":[${workJson.dropLast(1)},"score":0.8,"reason":"fits","matched_scenes":2,"rerank_score":0.75}],
             "scenes":["a","b"],"synopsis":"syn","tags":["t1"],"filters":{"language":"zh","status":null,"min_chapters":null,"max_chapters":null,
-            "include_tags":[],"exclude_tags":["harem"]},"reranked":true,"notes":["n"],"extra_field":1}"""))
-        val r = api.search(SearchRequest(description = "dark mystery", scenes = listOf("x"), synopsis = "y", tags = listOf("z")))
+            "include_tags":[],"exclude_tags":["harem"]},"reranked":true,"rerank_provider_used":"jev","notes":["n"],"extra_field":1}"""))
+        val r = api.search(SearchRequest(description = "dark mystery", rerankProvider = "claude", scenes = listOf("x"), synopsis = "y", tags = listOf("z")))
         assertEquals("w1", r.results.single().workId)
         assertEquals(2, r.results.single().matchedScenes)
         assertEquals("fits", r.results.single().reason)
         assertEquals(9.0, r.results.single().ratings.single().normalized, 0.0)
         assertEquals(listOf("harem"), r.filters.excludeTags)
         assertTrue(r.reranked)
+        assertEquals("jev", r.rerankProviderUsed)
+        assertEquals(0.75, r.results.single().rerankScore!!, 0.0)
         val req = server.takeRequest()
         assertEquals("POST", req.method)
         assertEquals("/search", req.path)
         assertEquals("Bearer tok", req.getHeader("Authorization"))
         val body = req.body.readUtf8()
         assertTrue(body, body.contains("\"description\":\"dark mystery\"") && body.contains("\"scenes\":[\"x\"]") && body.contains("\"synopsis\":\"y\""))
+        assertTrue(body, body.contains("\"rerank_provider\":\"claude\""))
         assertTrue(body, !body.contains("filters"))
     }
 

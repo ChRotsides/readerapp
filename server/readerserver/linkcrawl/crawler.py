@@ -29,7 +29,7 @@ from ..ai.spend import BudgetExceeded
 from ..config import Settings
 from ..crawl.http import BlockedError, CrawlDeferred, FetchError, PoliteClient, RobotsDisallowed, UnsafeURL
 from ..crawl.runner import CrawlRunner, upsert_record
-from ..models import AiUsage, LinkCrawlJob, SampleEmbedding
+from ..models import AiUsage, LinkCrawlJob, SampleEmbedding, SourceRecord
 from ..sources.base import SourceRecordData
 from .builder import RecipeBroken, RecipeSession, RecipeUnavailable
 from .chapters import embed_chapter_text
@@ -41,6 +41,9 @@ CLAIM_LOCK_KEY = 7_270_003  # pg advisory lock serializing job claims across wor
 MAX_REPAIRS_PER_KIND = 3  # per job: a recipe that keeps breaking is not going to be fixed by more attempts
 CACHE_PAGES = 4
 EMBED_DEFER_SECONDS = 300.0
+SPARE_CHAPTERS = 5  # chapter links kept beyond chapters_per_novel, so skipped (empty / locked) chapters do not shrink the novel
+BOOTSTRAP_PAGES = 5  # chapter pages sampled at most to write the first chapter recipe (empty pages teach nothing)
+BOOTSTRAP_PROSE_CHARS = 600  # visible text a sampled page needs to count as a chapter with prose
 SPEND_EVERY = 25  # chapter saves between job-spend recomputations (structural saves always recompute)
 
 
@@ -59,7 +62,15 @@ class JobStopped(Exception):
 
 
 class JobFailed(Exception):
-    pass
+    def __init__(self, message: str, reason: str = "crawl_error"):
+        super().__init__(message)
+        self.reason = reason
+
+
+class CrawlPaused(Exception):
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
 
 
 def domain_of(url: str) -> str:
@@ -70,6 +81,11 @@ def domain_of(url: str) -> str:
 def source_id_for(url: str) -> str:
     """Stable id of a novel URL (fragment dropped, trailing slash ignored)."""
     return hashlib.sha1((clean_url(url, url) or url).rstrip("/").encode()).hexdigest()
+
+
+def covers(done: int | None, wanted: int | None) -> bool:
+    """Does an earlier crawl limited to `done` chapters per novel (None = all) cover a job that asks for `wanted`?"""
+    return done is None or (wanted is not None and done >= wanted)
 
 
 def default_http_factory(settings: Settings) -> Callable[[str], PoliteClient]:
@@ -164,11 +180,41 @@ class LinkCrawler:
                     if job.attempts > self.settings.link_max_attempts:
                         job.status, job.lease_owner, job.lease_expires_at = "failed", None, None
                         job.error = f"the worker died {job.attempts - 1} times while running this job; giving up (resume it to try again)"
+                        job.stop_reason = "worker_retries_exhausted"
                         await s.flush()
                         continue
                 job.status, job.lease_owner, job.lease_expires_at, job.next_eligible_at = "running", owner, now + self._lease(), None
+                job.stop_reason, job.error = None, None
                 return job.id, owner
             return None
+
+    async def schedule_refresh(self) -> int:
+        """Opt-in recurring refresh (LINK_REFRESH_URLS): queue a site job per configured listing URL unless a job for that exact
+        URL is queued / running / paused / blocked, or one was updated within LINK_REFRESH_HOURS (so a failed job is not
+        retried before the next interval). Returns the number of jobs created; never raises."""
+        urls = [u.strip() for u in self.settings.link_refresh_urls.split(",") if u.strip()]
+        created = 0
+        for url in urls:
+            try:
+                p = urlsplit(url)
+                if p.scheme not in ("http", "https") or not p.hostname:
+                    log.warning("link refresh: ignoring %r (not an absolute http(s) URL)", url)
+                    continue
+                async with self.maker() as s, s.begin():
+                    await s.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": CLAIM_LOCK_KEY})
+                    since = datetime.now(UTC) - timedelta(hours=self.settings.link_refresh_hours)
+                    busy = await s.scalar(select(LinkCrawlJob.id).where(
+                        LinkCrawlJob.url == url,
+                        or_(LinkCrawlJob.status.in_(("queued", "running", "paused", "blocked")), LinkCrawlJob.updated_at > since)).limit(1))
+                    if busy is not None:
+                        continue
+                    s.add(LinkCrawlJob(url=url, domain=domain_of(url), scope="site", status="queued", checkpoint={},
+                                       chapters_per_novel=self.settings.link_refresh_chapters_per_novel))
+                    created += 1
+                    log.info("link refresh: queued a site job for %s", url)
+            except Exception:
+                log.exception("link refresh failed for %s", url)
+        return created
 
     async def run_due(self, max_jobs: int = 3) -> int:
         """Top up the set of running jobs to `max_jobs` (claims respect one-job-per-domain and expired leases) and return
@@ -205,6 +251,7 @@ class LinkCrawler:
         ctx.recipe = RecipeSession(job.domain, self.store, self.settings, self.llm, decider, lambda u: self._get_item(ctx, u), f"lc{job_id}")
         beat = asyncio.create_task(self._heartbeat(job_id, owner))
         status, error, defer_for = "done", None, None
+        reason = "catalog_exhausted" if job.scope == "site" else "novel_complete"
         try:
             await self._drive(ctx)
         except JobStopped:
@@ -213,24 +260,35 @@ class LinkCrawler:
             return
         except BlockedError as e:
             status, error = "blocked", str(e)
+            reason = "http_blocked"
             log.error("link job %s blocked: %s", job_id, e)
         except RobotsDisallowed as e:
             status, error = "blocked", f"robots.txt disallows {e}"
+            reason = "robots_disallowed"
         except CrawlDeferred as e:
             status, error, defer_for = "queued", f"deferred: {e}", e.seconds
+            reason = "retry_after"
         except EmbeddingRateLimited as e:
             status, error, defer_for = "queued", f"embedding rate limit: {e}", EMBED_DEFER_SECONDS
+            reason = "embedding_rate_limit"
         except BudgetExceeded as e:
             status, error = "paused", f"monthly AI budget reached: {e}"
-        except (JobFailed, RecipeBroken, RecipeUnavailable) as e:
+            reason = "budget_limit"
+        except CrawlPaused as e:
+            status, error, reason = "paused", str(e), e.reason
+        except JobFailed as e:
+            status, error, reason = "failed", str(e), e.reason
+        except (RecipeBroken, RecipeUnavailable) as e:
             status, error = "failed", str(e)
+            reason = "recipe_error"
         except Exception as e:
             status, error = "failed", f"{type(e).__name__}: {e}"
+            reason = "unexpected_error"
             log.exception("link job %s failed", job_id)
         finally:
             beat.cancel()
             await http.aclose()
-        await self._finish(ctx, status, error, defer_for)
+        await self._finish(ctx, status, error, defer_for, reason)
 
     async def _heartbeat(self, job_id: int, owner: str) -> None:
         interval = max(self.settings.crawl_lease_seconds / 3, 0.05)
@@ -265,7 +323,10 @@ class LinkCrawler:
             if structural or not ctx.ck.get("novel"):
                 vals["checkpoint"] = ctx.ck
             else:
-                vals["checkpoint"] = func.jsonb_set(LinkCrawlJob.checkpoint, text("'{novel,pos}'"), func.to_jsonb(cast(ctx.ck["novel"]["pos"], Integer)))
+                nv = ctx.ck["novel"]
+                with_pos = func.jsonb_set(LinkCrawlJob.checkpoint, text("'{novel,pos}'"), func.to_jsonb(cast(nv["pos"], Integer)))
+                with_good = func.jsonb_set(with_pos, text("'{novel,good}'"), func.to_jsonb(cast(nv.get("good", 0), Integer)))
+                vals["checkpoint"] = func.jsonb_set(with_good, text("'{empty_streak}'"), func.to_jsonb(cast(ctx.ck.get("empty_streak", 0), Integer)))
             res = await s.execute(update(LinkCrawlJob).where(LinkCrawlJob.id == ctx.job_id, LinkCrawlJob.lease_owner == ctx.owner).values(**vals))
             await s.commit()
         if res.rowcount == 0:
@@ -284,13 +345,12 @@ class LinkCrawler:
                             .values(lease_owner=None, lease_expires_at=None))
             await s.commit()
 
-    async def _finish(self, ctx: _Ctx, status: str, error: str | None, defer_for: float | None) -> None:
-        values = dict(status=status, error=error, lease_owner=None, lease_expires_at=None, spend_usd=await self._job_spend(ctx),
+    async def _finish(self, ctx: _Ctx, status: str, error: str | None, defer_for: float | None, reason: str) -> None:
+        values = dict(status=status, stop_reason=reason, error=error, checkpoint=ctx.ck,
+                      lease_owner=None, lease_expires_at=None, spend_usd=await self._job_spend(ctx),
                       pages_fetched=ctx.pages, novels_found=ctx.novels, chapters_embedded=ctx.embedded, chapters_skipped=ctx.skipped,
                       next_eligible_at=datetime.now(UTC) + timedelta(seconds=defer_for) if defer_for is not None else None,
                       updated_at=datetime.now(UTC))
-        if status == "done":
-            values["checkpoint"] = {}
         async with self.maker() as s:  # only if still ours and still running: a pause/cancel that raced us wins
             res = await s.execute(update(LinkCrawlJob).where(LinkCrawlJob.id == ctx.job_id, LinkCrawlJob.lease_owner == ctx.owner,
                                                              LinkCrawlJob.status == "running").values(**values))
@@ -353,7 +413,11 @@ class LinkCrawler:
                 await self._novel_step(ctx)
             elif ck["queue"]:
                 await self._begin_novel(ctx, ck["queue"][0])
+            elif ck.get("listing_pending"):
+                await self._queue_listing_links(ctx)
             elif ck.get("listing_next"):
+                if ck["novels_queued"] >= self.settings.link_max_novels:
+                    raise CrawlPaused("novel_limit", f"Novel limit reached ({self.settings.link_max_novels:,}). Raise the limit and resume; remaining work is saved.")
                 await self._listing_step(ctx)
             else:
                 return
@@ -368,7 +432,14 @@ class LinkCrawler:
         decision = await ctx.decider.page_type(await asyncio.to_thread(page_digest, html, purl(html, ctx.url)))
         ptype = decision.choice if decision else self._guess_page_type(ctx, html, ctx.url)
         ck = ctx.ck
-        ck.update(phase="crawl", queue=[], listing_next=None, listing_pages=0, novels_queued=0, novel=None)
+        completed = []
+        if ck.get("recover_completed"):
+            async with self.maker() as s:
+                completed = list((await s.scalars(select(SourceRecord.source_id).where(
+                    SourceRecord.source == "link", SourceRecord.raw["job_id"].as_integer() == ctx.job_id,
+                ))).all())
+        ck.update(phase="crawl", queue=[], listing_next=None, listing_pages=0, novels_queued=len(completed),
+                  queued_ids=completed, novel=None, recovered_novels=len(completed))
         if ptype == "novel_page":
             ck["queue"] = [ctx.url]
         elif ptype == "novel_listing" and ctx.scope == "site":
@@ -414,6 +485,11 @@ class LinkCrawler:
             return "chapter"
         return "other"
 
+    async def _has_prose(self, pages: list[tuple[str, str]]) -> bool:
+        def longest() -> int:
+            return max(len(BeautifulSoup(h, "html.parser").get_text(" ", strip=True)) for _, h in pages)
+        return await asyncio.to_thread(longest) >= BOOTSTRAP_PROSE_CHARS
+
     async def _is_locked_page(self, ctx: _Ctx, html: str, url: str) -> bool:
         """A chapter page with no extractable body that is a paywall/lock/placeholder is skipped, not a broken recipe."""
         txt = await asyncio.to_thread(lambda: BeautifulSoup(html, "html.parser").get_text(" ", strip=True))
@@ -434,11 +510,21 @@ class LinkCrawler:
             problem = check(res) if check else None
             if problem is None:
                 ctx.recipe.remember(kind, base, html)
+                if kind == "chapter":
+                    ctx.ck["empty_streak"] = 0
                 return res
             if attempt == 1:
                 return None
             if kind == "chapter" and await self._is_locked_page(ctx, html, base):
                 return None
+            if kind == "chapter" and getattr(res, "empty_body", False):
+                # The body container exists and holds nothing (illustrations-only page...): a page-local skip, not a broken
+                # recipe, unless this keeps happening (a redesign that empties the container) -> repair path. The streak
+                # lives in the checkpoint so restarts do not reset it.
+                ctx.ck["empty_streak"] = ctx.ck.get("empty_streak", 0) + 1
+                if ctx.ck["empty_streak"] < self.settings.link_consecutive_empty_chapters:
+                    log.info("link job %s: empty chapter body at %s (%s in a row), skipped", ctx.job_id, base, ctx.ck["empty_streak"])
+                    return None
             decision = await ctx.decider.page_type(await asyncio.to_thread(page_digest, html, base))
             if decision and decision.choice != expected:
                 return None
@@ -450,39 +536,89 @@ class LinkCrawler:
     # ------------------------------------------------------------ listings
     async def _listing_step(self, ctx: _Ctx) -> None:
         ck, url = ctx.ck, ctx.ck["listing_next"]
+        if ck["listing_pages"] >= self.settings.link_max_listing_pages:
+            raise CrawlPaused("listing_page_limit", f"Listing page limit reached ({self.settings.link_max_listing_pages:,}). Raise the limit and resume; the next page is saved.")
+        seen = set(ck.get("listing_seen", []))
+        if url in seen:
+            raise CrawlPaused("pagination_loop", "Listing pagination points to an already visited page. Check the listing recipe before resuming.")
         try:
             html = await self._get(ctx, url)
         except (FetchError, UnsafeURL, httpx.HTTPError) as e:
-            if ck["listing_pages"] == 0:
-                raise JobFailed(f"cannot fetch listing {url}: {e}") from e
-            html = None
+            raise JobFailed(f"cannot fetch listing {url}: {e}", "listing_error") from e
         res = None
         if html is not None:
             await ctx.recipe.ensure("listing", [(purl(html, url), html)])
             res = await self._extract(ctx, "listing", url, html, lambda r: None if r.novel_links else "novel_links matched nothing on this listing page")
-        ck["listing_pages"] += 1
-        ck["listing_next"] = None
         if res is None:
-            if ck["listing_pages"] == 1:
-                raise JobFailed("no novel links found on the listing page")
-            await self._save(ctx)
-            return
-        seen = set(ck.setdefault("listing_seen", []))
+            raise JobFailed(f"no novel links found on listing {url}; resume to retry this page", "listing_error")
+        ck["listing_pages"] += 1
         seen.add(url)
-        queued = set(ck.setdefault("queued_ids", []))  # a novel linked from several listing pages is crawled once
+        queued = set(ck.get("queued_ids", []))
+        candidates = []
         for link in res.novel_links:
-            if ck["novels_queued"] >= self.settings.link_max_novels:
-                break
             sid = source_id_for(link.url)
             if sid not in queued and (domain_of(link.url) == ctx.domain or domain_of(link.url).endswith("." + ctx.domain)):
-                queued.add(sid)
-                ck["queue"].append(link.url)
-                ck["novels_queued"] += 1
-        ck["queued_ids"] = sorted(queued)
-        if res.next_page and res.next_page not in seen and ck["listing_pages"] < self.settings.link_max_listing_pages \
-                and ck["novels_queued"] < self.settings.link_max_novels:
-            ck["listing_next"] = res.next_page
-        ck["listing_seen"] = sorted(seen)[-200:]
+                candidates.append((link.url, sid))
+                queued.add(sid)  # in-page duplicates
+        known = await self._known_complete(ctx, [sid for _, sid in candidates]) if ctx.scope == "site" else set()
+        pending = []
+        for u, sid in candidates:
+            if sid in known:
+                queued.discard(sid)  # not queued: a later page may repeat it and is checked again
+            else:
+                pending.append(u)
+        if known:
+            ck["known_skipped"] = ck.get("known_skipped", 0) + len(known)
+            log.info("link job %s: skipped %d novels already crawled by earlier jobs on %s (%d so far)", ctx.job_id, len(known), url, ck["known_skipped"])
+        # Save every candidate, including the remainder of a page that crosses a cap.
+        ck["listing_pending"] = pending
+        ck["listing_next"] = res.next_page
+        ck["listing_seen"] = sorted(seen)
+        await self._save(ctx)
+
+    async def _known_complete(self, ctx: _Ctx, ids: list[str]) -> set[str]:
+        """Source ids (of `ids`) whose stored `link` record an earlier crawl completed with at least this job's coverage.
+        One batch of queries per listing page. A record with a `raw["crawl"]` marker is judged by the marker alone (a marker
+        without `completed_at` is a re-crawl in progress or failed: not complete). A record without one (crawled before
+        markers existed) counts only if raw["job_id"] names a job that covers this one and a chapter embedding is stored."""
+        if not ids:
+            return set()
+        async with self.maker() as s:
+            rows = (await s.execute(select(SourceRecord.id, SourceRecord.source_id, SourceRecord.raw).where(
+                SourceRecord.source == "link", SourceRecord.source_id.in_(ids)))).all()
+            legacy = {}
+            for rid, sid, raw in rows:
+                raw = raw or {}
+                if isinstance(raw.get("crawl"), dict):
+                    continue
+                jid = raw.get("job_id")
+                if isinstance(jid, int) and not isinstance(jid, bool):
+                    legacy[rid] = jid
+            limits, embedded = {}, set()
+            if legacy:
+                limits = dict((await s.execute(select(LinkCrawlJob.id, LinkCrawlJob.chapters_per_novel).where(LinkCrawlJob.id.in_(set(legacy.values()))))).all())
+                embedded = set((await s.scalars(select(SampleEmbedding.source_record_id).where(
+                    SampleEmbedding.source_record_id.in_(list(legacy)), SampleEmbedding.chapter_index.is_not(None)).distinct())).all())
+        out = set()
+        for rid, sid, raw in rows:
+            marker = (raw or {}).get("crawl")
+            if isinstance(marker, dict):
+                if marker.get("completed_at") and covers(marker.get("chapters_per_novel"), ctx.per_novel):
+                    out.add(sid)
+            elif rid in legacy and legacy[rid] in limits and rid in embedded and covers(limits[legacy[rid]], ctx.per_novel):
+                out.add(sid)
+        return out
+
+    async def _queue_listing_links(self, ctx: _Ctx) -> None:
+        ck = ctx.ck
+        remaining = self.settings.link_max_novels - ck["novels_queued"]
+        if remaining <= 0:
+            raise CrawlPaused("novel_limit", f"Novel limit reached ({self.settings.link_max_novels:,}). Raise the limit and resume; remaining work is saved.")
+        accepted = ck["listing_pending"][:remaining]
+        ck["queue"].extend(accepted)
+        ck["listing_pending"] = ck["listing_pending"][len(accepted):]
+        ck["queued_ids"] = sorted(set(ck.get("queued_ids", [])) | {source_id_for(url) for url in accepted})
+        ck["novels_queued"] += len(accepted)
         await self._save(ctx)
 
     # ------------------------------------------------------------ novels
@@ -525,25 +661,36 @@ class LinkCrawler:
             await self._toc_step(ctx, nv)
         elif not nv["ready"]:
             await self._finalize_toc(ctx, nv)
-        elif nv["pos"] < len(nv["chapters"]):
+        elif nv["pos"] < len(nv["chapters"]) and not (ctx.per_novel and nv.get("good", 0) >= ctx.per_novel):
             await self._chapter_step(ctx, nv)
         else:
             await self._end_novel(ctx, nv)
 
     async def _toc_step(self, ctx: _Ctx, nv: dict) -> None:
         url = nv["toc_next"]
-        nv["toc_next"] = None
-        html = await self._get_item(ctx, url) if url not in nv["toc_seen"] else None
+        if nv["toc_pages"] >= self.settings.link_max_toc_pages:
+            raise CrawlPaused("toc_page_limit", f"Chapter-list page limit reached ({self.settings.link_max_toc_pages:,}). Raise the limit and resume; the next chapter-list page is saved.")
+        if url in nv["toc_seen"]:
+            raise CrawlPaused("pagination_loop", "Chapter-list pagination points to an already visited page. Check the novel recipe before resuming.")
+        html = await self._get_item(ctx, url)
+        if html is None:
+            raise JobFailed(f"cannot read chapter-list page {url}; resume to retry this page", "toc_error")
         if html is not None:
             nv["toc_seen"].append(url)
             nv["toc_pages"] += 1
             res = await asyncio.to_thread(ctx.recipe.novel, html, purl(html, url))  # chapter_links / chapter_list_next apply on every page
+            if not res.chapter_links:
+                # A page that yields no chapter links is a bad page, not the end of the list: a short total would make
+                # _end_novel delete the vectors of the later chapters. Stop paging and leave the total unknown.
+                log.warning("link job %s: chapter-list page %s yielded no chapter links; not paging further, total chapter count left unknown", ctx.job_id, url)
+                nv["toc_next"], nv["toc_complete"] = None, False
+                await self._save(ctx)
+                return
             known = {c[0] for c in nv["chapters"]}
             nv["chapters"] += [[link.url, link.text] for link in res.chapter_links if link.url not in known]
             enough = bool(ctx.per_novel and nv["meta"]["order"] == "asc" and len(nv["chapters"]) >= ctx.per_novel)
-            if res.next_toc and res.next_toc not in nv["toc_seen"] and nv["toc_pages"] < self.settings.link_max_toc_pages and not enough:
-                nv["toc_next"] = res.next_toc
-            elif res.next_toc and enough:
+            nv["toc_next"] = None if enough else res.next_toc
+            if res.next_toc and enough:
                 nv["toc_complete"] = False  # stopped paging early: the novel's total chapter count is not known
         await self._save(ctx)
 
@@ -553,13 +700,15 @@ class LinkCrawler:
         total = len(links)
         nv["total"] = total if nv.get("toc_complete", True) else None
         if ctx.per_novel:
-            links = links[: ctx.per_novel]
+            links = links[: ctx.per_novel + SPARE_CHAPTERS]  # spares replace chapters that turn out empty / locked
         nv["chapters"] = [[link.url, link.text] for link in links]
         m = nv["meta"]
         data = SourceRecordData(
             source="link", source_id=source_id_for(nv["url"]), title=m["title"], url=nv["url"], authors=m["authors"], synopsis=m["synopsis"],
             tags=m["tags"], genres=m["genres"], status=m["status"], chapter_count=nv["total"] or None, cover_url=m["cover_url"],
-            raw={"domain": ctx.domain, "job_id": ctx.job_id, "recipe_version_id": ctx.recipe.row_id})
+            raw={"domain": ctx.domain, "job_id": ctx.job_id, "recipe_version_id": ctx.recipe.row_id,
+                 # upsert_record replaces raw, so a re-crawl drops the old completion marker: until _end_novel runs it is not complete
+                 "crawl": {"job_id": ctx.job_id, "chapters_per_novel": ctx.per_novel, "completed_at": None}})
         async with self.maker() as s:
             rec, _ = await upsert_record(s, data)
             await s.commit()
@@ -576,10 +725,15 @@ class LinkCrawler:
         gate = ctx.gate
         if not ctx.recipe.has("chapter"):
             pages = []
-            for u, _ in nv["chapters"][pos: pos + 2]:
+            for i, (u, _) in enumerate(nv["chapters"][pos: pos + BOOTSTRAP_PAGES]):
                 h = await self._get_item(ctx, u)
                 if h:
                     pages.append((u, h))
+                if i >= 1 and pages:  # at least 2 chapters looked at; go on only while there is nothing to learn from
+                    if await ctx.recipe.restore("chapter", [(purl(h2, u2), h2) for u2, h2 in pages]):
+                        break
+                    if await self._has_prose(pages):
+                        break
             if not pages:
                 nv["pos"] += 1
                 ctx.skipped += 1
@@ -609,6 +763,8 @@ class LinkCrawler:
         async with self.maker() as s:
             out = await embed_chapter_text(s, self.embedder, self.settings, nv["record_id"], pos, fetch_text,  # type: ignore[arg-type]
                                            purpose=f"lc{ctx.job_id}:embed", gate=gate)
+        if out.outcome in ("embedded", "unchanged"):
+            nv["good"] = nv.get("good", 0) + 1  # usable chapters: chapters_per_novel counts these, not list positions
         if out.embedded:
             ctx.embedded += 1
         else:
@@ -621,6 +777,11 @@ class LinkCrawler:
         if nv.get("total") is not None:  # the whole chapter list was read: vectors of chapters that no longer exist are stale
             async with self.maker() as s:
                 await s.execute(delete(SampleEmbedding).where(SampleEmbedding.source_record_id == rid, SampleEmbedding.chapter_index >= nv["total"]))
+                await s.commit()
+        async with self.maker() as s:  # mark complete: later site jobs skip this novel if their coverage is no larger
+            rec = await s.get(SourceRecord, rid)
+            if rec is not None:
+                rec.raw = {**(rec.raw or {}), "crawl": {"job_id": ctx.job_id, "chapters_per_novel": ctx.per_novel, "completed_at": datetime.now(UTC).isoformat()}}
                 await s.commit()
         ctx.ck["novel"], ctx.gate = None, None
         await self._save(ctx)

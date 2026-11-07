@@ -70,6 +70,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.readerapp.data.db.Chapter
 import com.readerapp.data.db.ChapterStatus
+import com.readerapp.favorites.FavoriteRef
+import com.readerapp.favorites.isFavorite
+import com.readerapp.ui.favorites.FavoriteStar
+import com.readerapp.ui.favorites.FavoritesViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -79,7 +83,9 @@ fun NovelDetailScreen(
     onOpenInBrowser: (String) -> Unit,
     onOpenGlossary: (Long) -> Unit,
     viewModel: NovelDetailViewModel = hiltViewModel(),
+    favoritesViewModel: FavoritesViewModel = hiltViewModel(),
 ) {
+    val favorites by favoritesViewModel.favorites.collectAsStateWithLifecycle()
     val novel by viewModel.novel.collectAsStateWithLifecycle()
     val chapters by viewModel.chapters.collectAsStateWithLifecycle()
     val refreshing by viewModel.refreshing.collectAsStateWithLifecycle()
@@ -97,6 +103,8 @@ fun NovelDetailScreen(
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = {
                     novel?.let { n ->
+                        val ref = FavoriteRef.forNovel(n)
+                        FavoriteStar(favorites.isFavorite(ref), { favoritesViewModel.toggle(ref) })
                         IconButton(onClick = { onOpenInBrowser(n.sourceUrl) }) { Icon(Icons.Filled.Public, "Open source in browser") }
                     }
                 },

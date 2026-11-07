@@ -4,11 +4,14 @@ import com.readerapp.search.ConnectionResult
 import com.readerapp.search.CrawlJob
 import com.readerapp.search.CrawlRequest
 import com.readerapp.search.DiscoveryApi
+import com.readerapp.search.FavoriteDto
+import com.readerapp.search.FavoritesResponse
 import com.readerapp.search.LibraryUploadRequest
 import com.readerapp.search.LibraryUploadResult
 import com.readerapp.search.SearchException
 import com.readerapp.search.SearchRequest
 import com.readerapp.search.SearchResponse
+import com.readerapp.search.SimilarRequest
 import com.readerapp.search.Work
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -52,10 +55,16 @@ class CrawlViewModelTest {
         override suspend fun resumeCrawl(id: Long) = act("resume", id, "running")
         override suspend fun cancelCrawl(id: Long) = act("cancel", id, "cancelled")
         override suspend fun search(request: SearchRequest): SearchResponse = throw UnsupportedOperationException()
+        override suspend fun similar(request: SimilarRequest): SearchResponse = throw UnsupportedOperationException()
         override suspend fun work(workId: String): Work = throw UnsupportedOperationException()
         override suspend fun searchTitle(query: String, limit: Int): List<Work> = throw UnsupportedOperationException()
         override suspend fun testConnection(): ConnectionResult = throw UnsupportedOperationException()
         override suspend fun uploadLibraryChapters(request: LibraryUploadRequest): LibraryUploadResult = throw UnsupportedOperationException()
+        override suspend fun putFavorite(favorite: FavoriteDto): FavoriteDto = throw UnsupportedOperationException()
+        override suspend fun favorites(since: String?): FavoritesResponse = throw UnsupportedOperationException()
+        override suspend fun searches(since: String?, limit: Int): com.readerapp.search.SearchListResponse = throw UnsupportedOperationException()
+        override suspend fun searchEntry(id: String): com.readerapp.search.SearchEntryDto = throw UnsupportedOperationException()
+        override suspend fun deleteSearch(id: String) = throw UnsupportedOperationException()
     }
 
     private fun TestScope.vm(api: FakeApi) = CrawlViewModel(api)

@@ -104,6 +104,7 @@ class NovelResult:
 class ChapterResult:
     title: str | None
     text: str
+    empty_body: bool = False  # the body selector matched element(s) that held no text at all before any drop/cleanup (e.g. an illustrations-only page)
 
 
 def clean_url(base: str, href: str | None) -> str | None:
@@ -202,14 +203,20 @@ def apply_chapter(html: str, url: str, sec: ChapterSection) -> ChapterResult:
     for el in doc(["script", "style", "noscript", "template"]):
         el.decompose()
     title = next(iter(_texts(doc, sec.title, url)), None)
+    def parts_of() -> tuple[list[Tag], list[str]]:
+        matches = _select(doc, sec.body)
+        ids = {id(m) for m in matches}
+        top = [m for m in matches if not any(id(p) in ids for p in m.parents)]  # nested matches are already covered by their parent
+        return top, [t for t in (block_text(m) for m in top) if t]
+
+    top_before, parts_before = parts_of()
     for spec in sec.drop:
         for el in _select(doc, spec):
             el.decompose()
-    matches = _select(doc, sec.body)
-    ids = {id(m) for m in matches}
-    top = [m for m in matches if not any(id(p) in ids for p in m.parents)]  # nested matches are already covered by their parent
-    parts = [t for t in (block_text(m) for m in top) if t]
-    return ChapterResult(title, "\n\n".join(parts))
+    _, parts = parts_of()
+    # empty_body only when the container was there and empty BEFORE the recipe's drop selectors ran: text that the recipe
+    # removed (or a container it dropped) means the recipe is wrong, not the page.
+    return ChapterResult(title, "\n\n".join(parts), empty_body=bool(top_before) and not parts_before)
 
 
 def chapter_novel_links(html: str, url: str, sec: ChapterSection | None) -> list[str]:

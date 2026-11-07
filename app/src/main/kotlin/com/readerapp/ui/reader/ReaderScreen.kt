@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.TextFormat
 import androidx.compose.material3.Button
@@ -82,6 +83,8 @@ fun ReaderScreen(
     onBack: () -> Unit,
     onOpenInBrowser: (String) -> Unit,
     onOpenSettings: () -> Unit,
+    /** Opens Discover with a similar-novels search seeded from (novel id, the chapter being read). */
+    onFindSimilar: (Long, Long) -> Unit,
     viewModel: ReaderViewModel = hiltViewModel(),
     qaViewModel: QaViewModel = hiltViewModel(),
     ttsViewModel: TtsViewModel = hiltViewModel(),
@@ -95,6 +98,7 @@ fun ReaderScreen(
     val qa by qaViewModel.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     var showPrefs by remember { mutableStateOf(false) }
+    var overflow by remember { mutableStateOf(false) }
     val tts by ttsViewModel.state.collectAsStateWithLifecycle()
     val firstVisibleParagraph = remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) { ttsViewModel.messages.collect { snackbar.showSnackbar(it) } }
@@ -148,6 +152,17 @@ fun ReaderScreen(
                         }
                     }
                     IconButton(onClick = { showPrefs = true }) { Icon(Icons.Filled.TextFormat, "Text settings") }
+                    current?.let { c ->
+                        Box {
+                            IconButton(onClick = { overflow = true }) { Icon(Icons.Filled.MoreVert, "More") }
+                            DropdownMenu(expanded = overflow, onDismissRequest = { overflow = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Find similar novels") },
+                                    onClick = { overflow = false; onFindSimilar(c.novelId, c.id) },
+                                )
+                            }
+                        }
+                    }
                 },
             )
         },

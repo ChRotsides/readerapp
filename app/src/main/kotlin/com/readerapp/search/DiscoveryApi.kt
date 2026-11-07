@@ -30,6 +30,8 @@ import kotlin.coroutines.resumeWithException
 /** The discovery server, behind an interface so the screens can be tested with a fake. */
 interface DiscoveryApi {
     suspend fun search(request: SearchRequest): SearchResponse
+    /** Novels similar to a library novel or a corpus work; 409 ([SearchException.Http]) when the seed's chapters are not on the server yet. */
+    suspend fun similar(request: SimilarRequest): SearchResponse
     suspend fun work(workId: String): Work
     suspend fun searchTitle(query: String, limit: Int = 20): List<Work>
     suspend fun testConnection(): ConnectionResult
@@ -43,6 +45,18 @@ interface DiscoveryApi {
 
     /** Sends chapters the user downloaded to the server's search index (at most [LibraryUploadRequest.MAX_CHAPTERS]). */
     suspend fun uploadLibraryChapters(request: LibraryUploadRequest): LibraryUploadResult
+
+    /** Upserts one favorite (last write wins on `changed_at`); returns the state the server now holds, which may be newer than [favorite]. */
+    suspend fun putFavorite(favorite: FavoriteDto): FavoriteDto
+    /** Favorites changed after [since] (the previous `server_time`, tombstones included); only live ones when null. */
+    suspend fun favorites(since: String?): FavoritesResponse
+
+    /** Saved searches, newest first, without results. With [since] (the previous `server_time`) tombstones are included. */
+    suspend fun searches(since: String?, limit: Int = 200): SearchListResponse
+    /** One saved search with its results; [SearchException.NotFound] when it is gone. */
+    suspend fun searchEntry(id: String): SearchEntryDto
+    /** Deletes a saved search on the server (already gone counts as done). */
+    suspend fun deleteSearch(id: String)
 }
 
 data class ServerConfig(val baseUrl: String, val token: String)
@@ -59,6 +73,11 @@ class ServerApi(
     override suspend fun search(request: SearchRequest): SearchResponse {
         val body = json.encodeToString(SearchRequest.serializer(), request).toRequestBody(JSON_MEDIA)
         return call("search", { post(body) }, "search") { json.decodeFromString(SearchResponse.serializer(), it) }
+    }
+
+    override suspend fun similar(request: SimilarRequest): SearchResponse {
+        val body = json.encodeToString(SimilarRequest.serializer(), request).toRequestBody(JSON_MEDIA)
+        return call("similar", { post(body) }, "similar") { json.decodeFromString(SearchResponse.serializer(), it) }
     }
 
     override suspend fun work(workId: String): Work =
@@ -87,6 +106,32 @@ class ServerApi(
     override suspend fun uploadLibraryChapters(request: LibraryUploadRequest): LibraryUploadResult {
         val body = nullsJson.encodeToString(LibraryUploadRequest.serializer(), request).toRequestBody(JSON_MEDIA)
         return call("library/chapters", { post(body) }, null) { json.decodeFromString(LibraryUploadResult.serializer(), it) }
+    }
+
+    override suspend fun putFavorite(favorite: FavoriteDto): FavoriteDto {
+        val body = json.encodeToString(FavoriteDto.serializer(), favorite).toRequestBody(JSON_MEDIA)
+        return call("favorites", { put(body) }, null) { json.decodeFromString(FavoriteDto.serializer(), it) }
+    }
+
+    override suspend fun favorites(since: String?): FavoritesResponse =
+        call("favorites", { get() }, null, { since?.let { addQueryParameter("since", it) } }) {
+            json.decodeFromString(FavoritesResponse.serializer(), it)
+        }
+
+    override suspend fun searches(since: String?, limit: Int): SearchListResponse =
+        call("searches", { get() }, null, { since?.let { addQueryParameter("since", it) }; addQueryParameter("limit", limit.toString()) }) {
+            json.decodeFromString(SearchListResponse.serializer(), it)
+        }
+
+    override suspend fun searchEntry(id: String): SearchEntryDto =
+        call("searches/${id.trim()}", { get() }, null) { json.decodeFromString(SearchEntryDto.serializer(), it) }
+
+    override suspend fun deleteSearch(id: String) {
+        try {
+            call("searches/${id.trim()}", { delete() }, null) { }
+        } catch (e: SearchException.NotFound) {
+            // already gone
+        }
     }
 
     override suspend fun testConnection(): ConnectionResult = withContext(Dispatchers.IO) {

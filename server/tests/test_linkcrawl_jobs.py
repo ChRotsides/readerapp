@@ -85,7 +85,8 @@ async def test_novel_job_runs_to_done_and_builds_recipe(env, fake_embedder):
     jid = await add_job(maker)
     assert await run_next(c) == jid
     j = await job(maker, jid)
-    assert j.status == "done" and j.error is None and j.checkpoint == {}
+    assert j.status == "done" and j.error is None and j.stop_reason == "novel_complete"
+    assert j.checkpoint["queue"] == [] and j.checkpoint["novel"] is None
     # novel page + toc (cached from validation) + toc page 2 + 5 chapters
     assert (j.novels_found, j.chapters_embedded, j.chapters_skipped, j.pages_fetched) == (1, 4, 1, 8)
     assert float(j.spend_usd) > 0
