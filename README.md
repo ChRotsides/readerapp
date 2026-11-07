@@ -63,6 +63,6 @@ ReaderApp is built for personal reading of content you already have access to. I
 
 ReaderApp is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE): free for personal, research, education and other noncommercial use. It is source-available, not an OSI-approved open-source license.
 
-**Commercial use requires a separate license.** Contact Charalambos Rotsides at [lhampis@gmail.com](mailto:lhampis@gmail.com).
+**Commercial use requires a separate license.** Contact Charalambos Rotsides at [charalambosrotsides@gmail.com](mailto:charalambosrotsides@gmail.com) or [charalambosrotsides@outlook.com](mailto:charalambosrotsides@outlook.com).
 
 Third-party components keep their own licenses, including sherpa-onnx (Apache-2.0, `app/libs/`) and the Kokoro TTS model, which is downloaded at runtime.
