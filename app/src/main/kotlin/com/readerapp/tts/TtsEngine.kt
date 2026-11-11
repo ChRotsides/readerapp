@@ -1,9 +1,11 @@
 package com.readerapp.tts
 
 import com.k2fsa.sherpa.onnx.OfflineTts
+import com.k2fsa.sherpa.onnx.GenerationConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsSupertonicModelConfig
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
@@ -20,35 +22,59 @@ interface TtsEngine {
 }
 
 /**
- * Kokoro through sherpa-onnx. The native engine is not thread-safe, so it is created and used only on one dedicated
- * thread. Loading the ~330 MB model takes a couple of seconds, so it happens lazily on that thread on first use.
+ * A [TtsModel] through sherpa-onnx (Kokoro or Supertonic). The native engine is not thread-safe, so it is created and
+ * used only on one dedicated thread. Loading the model takes a couple of seconds, so it happens lazily on that
+ * thread on first use.
  */
-class KokoroEngine(private val modelDir: File, private val numThreads: Int) : TtsEngine {
-    private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "kokoro-tts").apply { priority = Thread.NORM_PRIORITY } }
+class SherpaEngine(private val model: TtsModel, private val modelDir: File, private val numThreads: Int) : TtsEngine {
+    private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "tts-engine").apply { priority = Thread.NORM_PRIORITY } }
     private val dispatcher: CoroutineDispatcher = executor.asCoroutineDispatcher()
     private var tts: OfflineTts? = null
 
-    private fun engine(): OfflineTts = tts ?: OfflineTts(
-        assetManager = null,
-        config = OfflineTtsConfig(
-            model = OfflineTtsModelConfig(
-                kokoro = OfflineTtsKokoroModelConfig(
-                    model = File(modelDir, "model.onnx").absolutePath,
-                    voices = File(modelDir, "voices.bin").absolutePath,
-                    tokens = File(modelDir, "tokens.txt").absolutePath,
-                    dataDir = File(modelDir, "espeak-ng-data").absolutePath,
-                ),
-                numThreads = numThreads,
-                debug = false,
-                provider = "cpu",
+    private fun path(name: String) = File(modelDir, name).absolutePath
+
+    private fun modelConfig(): OfflineTtsModelConfig = when (model.engine) {
+        EngineKind.KOKORO -> OfflineTtsModelConfig(
+            kokoro = OfflineTtsKokoroModelConfig(
+                model = path("model.onnx"),
+                voices = path("voices.bin"),
+                tokens = path("tokens.txt"),
+                dataDir = path("espeak-ng-data"),
+                lexicon = model.lexiconFiles.joinToString(",") { path(it) },
+                lang = model.lang.orEmpty(),
             ),
-        ),
-    ).also { tts = it }
+            numThreads = numThreads,
+            debug = false,
+            provider = "cpu",
+        )
+        EngineKind.SUPERTONIC -> OfflineTtsModelConfig(
+            supertonic = OfflineTtsSupertonicModelConfig(
+                durationPredictor = path("duration_predictor.int8.onnx"),
+                textEncoder = path("text_encoder.int8.onnx"),
+                vectorEstimator = path("vector_estimator.int8.onnx"),
+                vocoder = path("vocoder.int8.onnx"),
+                ttsJson = path("tts.json"),
+                unicodeIndexer = path("unicode_indexer.bin"),
+                voiceStyle = path("voice.bin"),
+            ),
+            numThreads = numThreads,
+            debug = false,
+            provider = "cpu",
+        )
+    }
+
+    private fun engine(): OfflineTts = tts ?: OfflineTts(assetManager = null, config = OfflineTtsConfig(model = modelConfig())).also { tts = it }
 
     override suspend fun synthesize(text: String, speaker: Int, speed: Float): PcmAudio = withContext(dispatcher) {
         val e = engine()
         val sid = speaker.coerceIn(0, (e.numSpeakers() - 1).coerceAtLeast(0))
-        val audio = e.generate(text, sid, speed)
+        val audio = when (model.engine) {
+            EngineKind.KOKORO -> e.generate(text, sid, speed)
+            EngineKind.SUPERTONIC -> e.generateWithConfig(
+                text,
+                GenerationConfig(sid = sid, speed = speed, numSteps = SUPERTONIC_STEPS, extra = mapOf("lang" to "en")),
+            )
+        }
         PcmAudio(audio.samples, audio.sampleRate)
     }
 
@@ -58,5 +84,10 @@ class KokoroEngine(private val modelDir: File, private val numThreads: Int) : Tt
             tts = null
         }
         executor.shutdown()
+    }
+
+    private companion object {
+        /** Denoising steps: fewer is faster, and 5 is what keeps up on this phone with the screen off. */
+        const val SUPERTONIC_STEPS = 5
     }
 }

@@ -115,13 +115,18 @@ object SentenceSplitter {
         return pieces
     }
 
+    private const val TRAILING_STRIPPED = "\"')]}"
     private val URL = Regex("""https?://\S+|www\.\S+""")
     private val TAG = Regex("""<[^>\n]{1,80}>""")
     private val JUNK_CHARS = Regex("""[\u0000-\u0008\u000B-\u001F\u007F​-‏ -‮⁠﻿*_~^#|\\`]""")
     private val SPACES = Regex("""\s+""")
     private val DASHES = Regex("""[-–—]{2,}|\s[-–—]\s|—""")
 
-    /** Text as sent to the synthesizer: junk stripped, CJK punctuation mapped to ASCII, whitespace collapsed. */
+    /**
+     * Text as sent to the synthesizer: junk stripped, CJK punctuation mapped to ASCII, whitespace collapsed, and
+     * trailing quotes / brackets removed: Kokoro v0.19 emits a cut-off burst of noise when the text ends in `."` or
+     * `.)`. Quotes elsewhere are harmless and kept.
+     */
     fun clean(raw: String): String {
         var t = URL.replace(raw, " ")
         t = TAG.replace(t, " ")
@@ -148,7 +153,7 @@ object SentenceSplitter {
         }
         t = DASHES.replace(mapped.toString(), ", ")
         t = t.replace("[", " ").replace("]", " ")
-        return SPACES.replace(t, " ").trim()
+        return SPACES.replace(t, " ").trimEnd { it.isWhitespace() || it in TRAILING_STRIPPED }.trim()
     }
 
     private fun isSpeakable(text: String): Boolean = text.any { it.isLetterOrDigit() }

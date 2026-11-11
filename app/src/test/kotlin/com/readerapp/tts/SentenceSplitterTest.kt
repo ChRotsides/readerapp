@@ -31,11 +31,31 @@ class SentenceSplitterTest {
     @Test
     fun quotesStayWithTheirSentence() {
         assertEquals(
-            listOf("\"Where are you going?\" she asked.", "\"Out.\"", "He left."),
+            listOf("\"Where are you going?\" she asked.", "\"Out.", "He left."),
             texts("\"Where are you going?\" she asked. \"Out.\" He left."),
         )
         // A closing quote followed by a capital letter ends the sentence inside the quote.
-        assertEquals(listOf("\"Stop!\"", "Nobody listened."), texts("\"Stop!\" Nobody listened."))
+        assertEquals(listOf("\"Stop!", "Nobody listened."), texts("\"Stop!\" Nobody listened."))
+    }
+
+    @Test
+    fun trailingClosersAreStrippedButMiddleOnesKept() {
+        assertEquals(listOf("He said \"no."), texts("He said \"no.\""))
+        assertEquals(listOf("Really?"), texts("Really?'"))
+        assertEquals(listOf("(It was late!"), texts("(It was late!)"))
+        assertEquals(listOf("Wow!"), texts("Wow!\")]} "))
+        assertEquals(listOf("\"Hi,\" she said."), texts("\"Hi,\" she said."))
+        assertEquals(listOf("\"Go.\" Then"), listOf(SentenceSplitter.clean("\"Go.\" Then\"")))
+        // Curly quotes are mapped to ASCII first, so they are stripped too.
+        assertEquals("Stop!", SentenceSplitter.clean("Stop!”"))
+    }
+
+    @Test
+    fun strippingDoesNotMoveSpanOffsets() {
+        val p = "He yelled \"Stop!\" Then left."
+        val first = SentenceSplitter.split(p)[0]
+        assertEquals("He yelled \"Stop!", first.text)
+        assertEquals("He yelled \"Stop!\"", p.substring(first.start, first.end))
     }
 
     @Test

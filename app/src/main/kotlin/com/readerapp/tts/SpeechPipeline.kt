@@ -104,6 +104,9 @@ sealed interface PipelineEvent {
     data class StartFailed(val reason: String) : PipelineEvent
 }
 
+/** Timing of one sentence that was actually synthesized (not a cache hit). */
+data class SynthesisTiming(val modelId: String, val generationMs: Long, val audioMs: Long)
+
 /**
  * Generates speech ahead of the playhead. Sentences are synthesized in order (through the cache), appended to the
  * [sink], and generation pauses once [lookahead] sentences are queued beyond the playhead. When a chapter's
@@ -114,11 +117,14 @@ sealed interface PipelineEvent {
 class SpeechPipeline(
     private val scope: CoroutineScope,
     private val source: SpeechSource,
-    private val engine: suspend () -> TtsEngine,
+    /** Returns the engine for a model id (see [TtsModels]); called only when a sentence is not cached. */
+    private val engine: suspend (modelId: String) -> TtsEngine,
     private val cache: AudioCache,
     private val sink: PlaylistSink,
     private val lookahead: Int = TtsConfig.LOOKAHEAD_SENTENCES,
     private val evictEvery: Int = 10,
+    private val onTiming: (SynthesisTiming) -> Unit = {},
+    private val nanoClock: () -> Long = System::nanoTime,
 ) {
     private var job: Job? = null
     private val playIndex = MutableStateFlow(0)
@@ -145,8 +151,8 @@ class SpeechPipeline(
         playIndex.value = index
     }
 
-    /** (Re)starts generation at [from] (sentence-level) using [voice] and [speed]. Clears the sink first. */
-    fun start(from: SpeechRef, voice: Int, speed: Float) {
+    /** (Re)starts generation at [from] (sentence-level) using [modelId], [voice] and [speed]. Clears the sink first. */
+    fun start(from: SpeechRef, voice: Int, speed: Float, modelId: String = TtsModels.DEFAULT_ID) {
         job?.cancel()
         val previous = job
         _done.value = false
@@ -158,7 +164,7 @@ class SpeechPipeline(
             _done.value = false
             recent.clear()
             try {
-                run(from, voice, speed)
+                run(from, voice, speed, modelId)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -174,7 +180,8 @@ class SpeechPipeline(
         _done.value = true
     }
 
-    private suspend fun run(from: SpeechRef, voice: Int, speed: Float) {
+    private suspend fun run(from: SpeechRef, voice: Int, speed: Float, modelId: String) {
+        val tag = TtsModels.byId(modelId).tag
         var chapterId = from.chapterId
         var first = true
         while (true) {
@@ -193,16 +200,22 @@ class SpeechPipeline(
             for ((i, s) in sentences.withIndex()) {
                 // Throttle: stay at most `lookahead` sentences ahead of what is playing.
                 playIndex.first { _generated.value - it < lookahead }
-                val key = AudioKey(chapter.chapterId, chapter.variant, voice, speed, s.ref.paragraph, s.ref.sentence, AudioKey.hash(s.text))
+                val key = AudioKey(chapter.chapterId, chapter.variant, tag, voice, speed, s.ref.paragraph, s.ref.sentence, AudioKey.hash(s.text))
                 val file = cache.get(key) ?: withContext(Dispatchers.IO) {
-                    val audio = engine().synthesize(s.text, voice, speed)
+                    val t0 = nanoClock()
+                    val audio = engine(modelId).synthesize(s.text, voice, speed)
+                    val generationMs = (nanoClock() - t0) / 1_000_000
                     if (audio.samples.isEmpty()) {
                         // Punctuation-only "sentences" (e.g. "***") legitimately make no sound; anything with words
                         // means the engine is broken, and silently skipping would race through the chapter.
                         if (s.text.any { it.isLetterOrDigit() }) error("Speech engine produced no audio")
                         null
                     } else {
-                        cache.put(key) { WavWriter.write(it, audio.samples, audio.sampleRate) }
+                        val endsParagraph = sentences.getOrNull(i + 1)?.ref?.paragraph != s.ref.paragraph
+                        val pause = AudioShaper.pauseMs(s.text, endsParagraph, speed)
+                        val shaped = AudioShaper.shape(audio.samples, audio.sampleRate, pause)
+                        onTiming(SynthesisTiming(modelId, generationMs, audio.samples.size * 1000L / audio.sampleRate))
+                        cache.put(key) { WavWriter.write(it, shaped, audio.sampleRate) }
                     }
                 } ?: continue
                 val duration = withContext(Dispatchers.IO) { WavWriter.durationMs(file) }

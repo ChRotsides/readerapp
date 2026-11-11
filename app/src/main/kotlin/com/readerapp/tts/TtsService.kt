@@ -30,6 +30,7 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.readerapp.MainActivity
 import com.readerapp.R
+import com.readerapp.tts.model.ModelManager
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -56,6 +57,7 @@ class TtsService : MediaSessionService() {
     @Inject lateinit var engines: EngineProvider
     @Inject lateinit var source: ChapterSpeechSource
     @Inject lateinit var settings: TtsSettings
+    @Inject lateinit var models: ModelManager
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val workScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -69,7 +71,8 @@ class TtsService : MediaSessionService() {
     private val window = PlaylistWindow(KEEP_BEHIND)
     private val items: ArrayList<ReadyItem> get() = window.items
     private var starved = false
-    private var voice = TtsConfig.DEFAULT_VOICE
+    private var modelId = TtsModels.DEFAULT_ID
+    private var voice = TtsModels.DEFAULT.defaultVoice
     private var speed = TtsConfig.DEFAULT_SPEED
     private var sleepJob: Job? = null
     /** Set while we stop the player ourselves, so the IDLE it reports is not mistaken for an external stop. */
@@ -130,7 +133,7 @@ class TtsService : MediaSessionService() {
         // Register the session with the service explicitly: no MediaController connects to it, so without this the
         // notification manager would never observe it (stuck "preparing" notification, wrong task-removal handling).
         addSession(checkNotNull(session))
-        pipeline = SpeechPipeline(workScope, source, { engines.get() }, cache, sink)
+        pipeline = SpeechPipeline(workScope, source, { id -> engines.get(id) }, cache, sink, onTiming = ::recordTiming)
         scope.launch { for (cmd in controller.commands) handle(cmd) }
         scope.launch {
             pipeline.events.collect { e ->
@@ -205,29 +208,44 @@ class TtsService : MediaSessionService() {
                 controller.update { it.copy(voice = cmd.voice) }
                 restartHere()
             }
+            is TtsCommand.SetModel -> setModel(cmd.modelId)
             is TtsCommand.Sleep -> setSleep(cmd.spec)
         }
     }
 
+    private suspend fun setModel(id: String) {
+        val model = TtsModels.byId(id)
+        if (!models.installer(model.id).isInstalled()) {
+            controller.message("${model.name} needs to be downloaded first (Settings > Text to speech).")
+            return
+        }
+        settings.setModel(model.id)
+        modelId = model.id
+        voice = settings.current().voice
+        controller.update { it.copy(modelId = modelId, voice = voice) }
+        restartHere()
+    }
+
     private suspend fun start(cmd: TtsCommand.Start) {
         val prefs = settings.current()
+        modelId = prefs.modelId
         voice = prefs.voice
         speed = prefs.speed
         cache.maxBytes = prefs.cacheLimitMb * MB
         source.selected = cmd.variant
         controller.update {
-            it.copy(active = true, playing = true, buffering = true, ref = cmd.from, voice = voice, speed = speed, sentenceText = "")
+            it.copy(active = true, playing = true, buffering = true, ref = cmd.from, modelId = modelId, voice = voice, speed = speed, sentenceText = "")
         }
         player.playWhenReady = true
         acquireWakeLock()
-        pipeline.start(cmd.from, voice, speed)
+        pipeline.start(cmd.from, voice, speed, modelId)
     }
 
     /** Restarts generation at the sentence being played (after a voice / speed change). */
     private fun restartHere() {
         val ref = currentItem()?.ref ?: controller.state.value.ref ?: return
         controller.update { it.copy(buffering = true) }
-        pipeline.start(ref, voice, speed)
+        pipeline.start(ref, voice, speed, modelId)
     }
 
     private fun skipParagraph(forward: Boolean) {
@@ -237,7 +255,7 @@ class TtsService : MediaSessionService() {
         if (forward) {
             val next = (idx + 1 until items.size).firstOrNull { !same(it) }
             if (next != null) player.seekTo(next, 0)
-            else pipeline.start(SpeechRef(cur.chapterId, cur.paragraph + 1, 0), voice, speed).also { markBuffering() }
+            else pipeline.start(SpeechRef(cur.chapterId, cur.paragraph + 1, 0), voice, speed, modelId).also { markBuffering() }
         } else {
             var first = idx
             while (first > 0 && same(first - 1)) first--
@@ -247,7 +265,7 @@ class TtsService : MediaSessionService() {
                 // paragraph before it when we are already at its start).
                 val target = if (cur.sentence > 0) cur.paragraph else cur.paragraph - 1
                 if (target >= 0) {
-                    pipeline.start(SpeechRef(cur.chapterId, target, 0), voice, speed).also { markBuffering() }
+                    pipeline.start(SpeechRef(cur.chapterId, target, 0), voice, speed, modelId).also { markBuffering() }
                 } else player.seekTo(0, 0)
                 return
             }
@@ -257,7 +275,7 @@ class TtsService : MediaSessionService() {
                     items[prev - 1].ref.paragraph == items[prev].ref.paragraph) prev--
                 player.seekTo(prev, 0)
             } else if (cur.paragraph > 0) {
-                pipeline.start(SpeechRef(cur.chapterId, cur.paragraph - 1, 0), voice, speed).also { markBuffering() }
+                pipeline.start(SpeechRef(cur.chapterId, cur.paragraph - 1, 0), voice, speed, modelId).also { markBuffering() }
             } else player.seekTo(0, 0)
         }
     }
@@ -268,7 +286,7 @@ class TtsService : MediaSessionService() {
         val cur = items.firstOrNull()?.ref
         if (window.hasTrimmedHead && cur != null) {
             val target = if (cur.sentence > 0) cur.paragraph else cur.paragraph - 1
-            if (target >= 0) pipeline.start(SpeechRef(cur.chapterId, target, 0), voice, speed).also { markBuffering() }
+            if (target >= 0) pipeline.start(SpeechRef(cur.chapterId, target, 0), voice, speed, modelId).also { markBuffering() }
         } else player.seekTo(0, 0)
     }
 
@@ -297,7 +315,7 @@ class TtsService : MediaSessionService() {
             if (next == null) controller.message("This is the last known chapter.") else {
                 player.playWhenReady = true
                 markBuffering()
-                pipeline.start(SpeechRef(next, 0, 0), voice, speed)
+                pipeline.start(SpeechRef(next, 0, 0), voice, speed, modelId)
             }
         }
     }
@@ -492,8 +510,34 @@ class TtsService : MediaSessionService() {
             .createNotificationChannel(NotificationChannel(CHANNEL_ID, getString(R.string.tts_channel_name), NotificationManager.IMPORTANCE_LOW))
     }
 
+    // ---- generation timing ----------------------------------------------------------------------------------
+
+    private var timingModel = ""
+    private var timingCount = 0
+    private var timingGenMs = 0L
+    private var timingAudioMs = 0L
+
+    /** Called from the generation thread for every synthesized (not cached) sentence; logs a summary every 10. */
+    @Synchronized
+    private fun recordTiming(t: SynthesisTiming) {
+        if (timingCount > 0 && timingModel != t.modelId) flushTiming()
+        timingModel = t.modelId
+        timingCount++
+        timingGenMs += t.generationMs
+        timingAudioMs += t.audioMs
+        if (timingCount >= TIMING_LOG_EVERY) flushTiming()
+    }
+
+    private fun flushTiming() {
+        Log.i(TAG, "synth model=$timingModel sentences=$timingCount generationMs=$timingGenMs audioMs=$timingAudioMs")
+        timingCount = 0
+        timingGenMs = 0
+        timingAudioMs = 0
+    }
+
     private companion object {
         const val TAG = "ReaderTts"
+        const val TIMING_LOG_EVERY = 10
         const val CHANNEL_ID = "tts_playback"
         const val NOTIFICATION_ID = 4100
         const val ACTION_NEXT_CHAPTER = "readerapp.tts.NEXT_CHAPTER"

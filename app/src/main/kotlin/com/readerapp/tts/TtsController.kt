@@ -6,6 +6,9 @@ import androidx.core.content.ContextCompat
 import com.readerapp.data.db.TextVariant
 import com.readerapp.tts.model.ModelManager
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,6 +16,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -36,6 +40,9 @@ sealed interface TtsCommand {
     data class SetSpeed(val speed: Float) : TtsCommand
     data class SetVoice(val voice: Int) : TtsCommand
 
+    /** Switches to an installed model and restarts generation at the current sentence. */
+    data class SetModel(val modelId: String) : TtsCommand
+
     /** null cancels the timer. */
     data class Sleep(val spec: SleepSpec?) : TtsCommand
 }
@@ -52,7 +59,8 @@ data class TtsState(
     val novelTitle: String = "",
     val chapterTitle: String = "",
     val sentenceText: String = "",
-    val voice: Int = TtsConfig.DEFAULT_VOICE,
+    val modelId: String = TtsModels.DEFAULT_ID,
+    val voice: Int = TtsModels.DEFAULT.defaultVoice,
     val speed: Float = TtsConfig.DEFAULT_SPEED,
     val sleepEndsAtMs: Long? = null,
     val sleepEndOfChapter: Boolean = false,
@@ -66,7 +74,9 @@ data class TtsState(
 class TtsController @Inject constructor(
     @ApplicationContext private val context: Context,
     private val models: ModelManager,
+    private val settings: TtsSettings,
 ) {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val _state = MutableStateFlow(TtsState())
     val state: StateFlow<TtsState> = _state.asStateFlow()
 
@@ -77,16 +87,19 @@ class TtsController @Inject constructor(
 
     internal val commands = Channel<TtsCommand>(Channel.UNLIMITED)
 
-    val modelInstalled: Boolean get() = models.installer.isInstalled()
+    /** Whether the currently selected model is installed. */
+    suspend fun modelInstalled(): Boolean = models.installer(settings.current().modelId).isInstalled()
 
     fun send(command: TtsCommand) {
         if (command is TtsCommand.Start) {
-            if (!modelInstalled) {
-                _messages.tryEmit("The speech model isn't installed yet.")
-                return
+            scope.launch {
+                if (!modelInstalled()) {
+                    _messages.tryEmit("The speech model isn't installed yet.")
+                } else {
+                    commands.trySend(command)
+                    ContextCompat.startForegroundService(context, Intent(context, TtsService::class.java))
+                }
             }
-            commands.trySend(command)
-            ContextCompat.startForegroundService(context, Intent(context, TtsService::class.java))
         } else if (_state.value.active) {
             commands.trySend(command)
         }
@@ -101,6 +114,6 @@ class TtsController @Inject constructor(
     }
 
     internal fun reset() {
-        _state.value = TtsState(voice = _state.value.voice, speed = _state.value.speed)
+        _state.value = TtsState(modelId = _state.value.modelId, voice = _state.value.voice, speed = _state.value.speed)
     }
 }

@@ -76,7 +76,14 @@ If a site deliberately obfuscates text, do not try to defeat it.
 - Default to Haiku for bulk work (fix/translate/summaries), Sonnet for Q&A and adapter authoring.
 
 ## TTS
-- Kokoro-82M via sherpa-onnx, on device, full precision. Model downloaded on first use (not bundled in APK).
+- On-device synthesis via sherpa-onnx; models are downloaded on demand (not bundled in APK) and chosen in Settings:
+  Kokoro v0.19 (default, natural but too slow with the screen off on the target phone), Kokoro v1.0 (more voices, same
+  speed) and Supertonic int8 (much faster, keeps up with the screen off, 44.1 kHz). The registry is `TtsModels`; each
+  model has its own voice list and voice preference, and audio cache names carry a model tag.
+- Clip shaping (`AudioShaper`): sentence text loses trailing quotes/brackets (Kokoro v0.19 emits a cut-off burst after
+  `."`), clips are trimmed to the sound (-42 dBFS, 10 ms lead / 40 ms tail margin), faded (3 ms in, 15 ms out) and
+  followed by a fixed pause: 90 ms after a comma-split piece, 220 ms at a sentence end, 420 ms at a paragraph end,
+  divided by the playback speed. Bumping `TtsConfig.SHAPING_VERSION` retires old cached clips.
 - Media3 `MediaSessionService` foreground service: lock-screen controls, keeps generating while screen is off.
 - Paragraph/sentence-level synthesis, generate ahead, cache audio per chapter, sentence highlighting in reader.
 - TTS reads whichever variant the reader shows (translated/fixed/original).

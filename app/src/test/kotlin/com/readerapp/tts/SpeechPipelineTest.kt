@@ -204,4 +204,67 @@ class SpeechPipelineTest {
         val event = firstEvent(p, SpeechRef(1, 0, 0))
         assertEquals(PipelineEvent.StartFailed("nope 1"), event)
     }
+
+    /** Engine returning a loud 300 ms tone with silence around it, so shaping has something to trim. */
+    private class ToneEngine : TtsEngine {
+        override suspend fun synthesize(text: String, speaker: Int, speed: Float): PcmAudio {
+            val s = FloatArray(24_000 * 600 / 1000)
+            for (i in 4_800 until 4_800 + 7_200) s[i] = if (i % 2 == 0) 0.5f else -0.5f
+            return PcmAudio(s, 24_000)
+        }
+
+        override fun release() = Unit
+    }
+
+    @Test
+    fun shapesClipsWithPausesByPosition() {
+        val sink = RecordingSink()
+        // paragraph 0: sentence ending a paragraph, a sentence cut at a comma, a normal one; paragraph 1: one sentence.
+        val one = mapOf(1L to listOf(listOf("He ran.", "and then,", "He fell."), listOf("The end.")))
+        val p = SpeechPipeline(scope, FakeSource(one, listOf(1)), { ToneEngine() }, cache, sink, lookahead = 100)
+        p.start(SpeechRef(1, 0, 0), 1, 1f)
+        until { p.done.value }
+        // Sound 300 ms + 10 ms lead + 40 ms tail margins = 350 ms, plus the pause.
+        assertEquals(listOf(350L + 220, 350L + 90, 350L + 420, 350L + 420), sink.items.map { it.durationMs })
+    }
+
+    @Test
+    fun pausesShrinkWithSpeed() {
+        val sink = RecordingSink()
+        val one = mapOf(1L to listOf(listOf("He ran.", "He fell.")))
+        val p = SpeechPipeline(scope, FakeSource(one, listOf(1)), { ToneEngine() }, cache, sink, lookahead = 100)
+        p.start(SpeechRef(1, 0, 0), 1, 2f)
+        until { p.done.value }
+        assertEquals(listOf(350L + 110, 350L + 210), sink.items.map { it.durationMs })
+    }
+
+    @Test
+    fun reportsTimingOnlyForSynthesizedSentences() {
+        val timings = Collections.synchronizedList(mutableListOf<SynthesisTiming>())
+        fun pipeline() = SpeechPipeline(scope, FakeSource(book, listOf(1)), { FakeEngine() }, cache, RecordingSink(), lookahead = 100, onTiming = { timings += it })
+        val p1 = pipeline()
+        p1.start(SpeechRef(1, 0, 0), 1, 1f, "supertonic-int8")
+        until { p1.done.value }
+        assertEquals(3, timings.size)
+        assertTrue(timings.all { it.modelId == "supertonic-int8" && it.audioMs == 100L && it.generationMs >= 0 })
+
+        val p2 = pipeline() // all cached now
+        p2.start(SpeechRef(1, 0, 0), 1, 1f, "supertonic-int8")
+        until { p2.done.value }
+        assertEquals(3, timings.size)
+    }
+
+    @Test
+    fun differentModelsDoNotShareCachedClips() {
+        val first = FakeEngine()
+        val p1 = SpeechPipeline(scope, FakeSource(book, listOf(1)), { first }, cache, RecordingSink(), lookahead = 100)
+        p1.start(SpeechRef(1, 0, 0), 1, 1f, "kokoro-en-v0_19")
+        until { p1.done.value }
+        val second = FakeEngine()
+        val p2 = SpeechPipeline(scope, FakeSource(book, listOf(1)), { second }, cache, RecordingSink(), lookahead = 100)
+        p2.start(SpeechRef(1, 0, 0), 1, 1f, "supertonic-int8")
+        until { p2.done.value }
+        assertEquals(3, first.calls.get())
+        assertEquals(3, second.calls.get())
+    }
 }

@@ -8,9 +8,17 @@ import androidx.work.OutOfQuotaPolicy
 import androidx.work.Constraints
 import androidx.work.NetworkType
 import androidx.work.WorkManager
-import com.readerapp.tts.TtsConfig
+import androidx.work.workDataOf
+import com.readerapp.tts.TtsModels
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -103,42 +111,46 @@ fun sha256Hex(file: File): String {
     return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
-/** App-wide owner of the model installer; starts the download as a foreground-service WorkManager job. */
+/** App-wide owner of one [ModelInstaller] per registry model; downloads run as foreground-service WorkManager jobs. */
 @Singleton
 class ModelManager @Inject constructor(@ApplicationContext private val context: Context) {
-    val installer = ModelInstaller(
-        spec = ModelSpec(
-            url = TtsConfig.MODEL_URL,
-            archiveBytes = TtsConfig.MODEL_ARCHIVE_BYTES,
-            sha256 = TtsConfig.MODEL_SHA256,
-            dirName = TtsConfig.MODEL_DIR_NAME,
-            requiredFiles = TtsConfig.REQUIRED_FILES,
-            extractedBytesEstimate = TtsConfig.EXTRACTED_BYTES_ESTIMATE,
-            freeSpaceMarginBytes = TtsConfig.FREE_SPACE_MARGIN_BYTES,
-        ),
-        root = File(context.getExternalFilesDir(null) ?: context.filesDir, "tts"),
-        downloader = OkHttpModelDownloader(),
-        extractor = CommonsArchiveExtractor(),
-        freeSpace = FreeSpace { dir -> StatFs(dir.absolutePath).availableBytes },
-        sha256Of = ::sha256Hex,
-    )
+    private val root = File(context.getExternalFilesDir(null) ?: context.filesDir, "tts")
+    private val downloader = OkHttpModelDownloader()
+    private val extractor = CommonsArchiveExtractor()
 
-    val state get() = installer.state
+    private val installers: Map<String, ModelInstaller> = TtsModels.ALL.associate { m ->
+        m.id to ModelInstaller(
+            spec = m.spec,
+            root = root,
+            downloader = downloader,
+            extractor = extractor,
+            freeSpace = FreeSpace { dir -> StatFs(dir.absolutePath).availableBytes },
+            sha256Of = ::sha256Hex,
+        )
+    }
 
-    /** Queues the download (resumes a partial one). Safe to call repeatedly. */
-    fun startDownload() {
+    fun installer(modelId: String): ModelInstaller = installers.getValue(TtsModels.byId(modelId).id)
+
+    fun state(modelId: String): StateFlow<ModelState> = installer(modelId).state
+
+    /** All models' states, keyed by model id. */
+    val states: StateFlow<Map<String, ModelState>> = combine(TtsModels.ALL.map { m -> state(m.id).map { m.id to it } }) { it.toMap() }
+        .stateIn(CoroutineScope(SupervisorJob() + Dispatchers.Default), SharingStarted.Eagerly, TtsModels.ALL.associate { it.id to state(it.id).value })
+
+    /** Queues the download of [modelId] (resumes a partial one). Safe to call repeatedly. */
+    fun startDownload(modelId: String) {
+        val id = TtsModels.byId(modelId).id
         val request = OneTimeWorkRequestBuilder<ModelDownloadWorker>()
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .setInputData(workDataOf(ModelDownloadWorker.KEY_MODEL_ID to id))
             .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
             .build()
-        WorkManager.getInstance(context).enqueueUniqueWork(WORK_NAME, ExistingWorkPolicy.KEEP, request)
+        WorkManager.getInstance(context).enqueueUniqueWork(workName(id), ExistingWorkPolicy.KEEP, request)
     }
 
-    fun cancelDownload() {
-        WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
+    fun cancelDownload(modelId: String) {
+        WorkManager.getInstance(context).cancelUniqueWork(workName(TtsModels.byId(modelId).id))
     }
 
-    private companion object {
-        const val WORK_NAME = "tts-model-download"
-    }
+    private fun workName(id: String) = "tts-model-download-$id"
 }

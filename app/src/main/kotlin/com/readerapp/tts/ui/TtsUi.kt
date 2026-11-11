@@ -22,6 +22,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -40,6 +41,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.readerapp.tts.SleepSpec
 import com.readerapp.tts.TtsCommand
 import com.readerapp.tts.TtsConfig
+import com.readerapp.tts.TtsModel
+import com.readerapp.tts.TtsModels
 import com.readerapp.tts.TtsState
 import com.readerapp.tts.model.ModelState
 import java.util.Locale
@@ -52,15 +55,15 @@ private fun mb(bytes: Long) = "${bytes / 1_000_000} MB"
 /** "Download the speech model?" confirmation, shown when reading aloud is requested before the model exists. */
 @Composable
 fun TtsDialogs(viewModel: TtsViewModel = hiltViewModel()) {
-    val confirm by viewModel.confirmDownload.collectAsStateWithLifecycle()
-    if (!confirm) return
+    val model by viewModel.confirmDownload.collectAsStateWithLifecycle()
+    val m = model ?: return
     AlertDialog(
         onDismissRequest = viewModel::dismissDownload,
         title = { Text("Download speech model?") },
         text = {
             Text(
-                "Reading aloud runs fully on this phone using the Kokoro voice model. It is a one-time download of " +
-                    "${mb(TtsConfig.MODEL_ARCHIVE_BYTES)} (about ${mb(TtsConfig.MODEL_ARCHIVE_BYTES + TtsConfig.EXTRACTED_BYTES_ESTIMATE)} " +
+                "Reading aloud runs fully on this phone using the ${m.name} voice model. It is a one-time download of " +
+                    "${mb(m.spec.archiveBytes)} (about ${mb(m.spec.archiveBytes + m.spec.extractedBytesEstimate)} " +
                     "of free storage is needed while unpacking). Wi-Fi is recommended. Progress shows in a notification and can be resumed.",
             )
         },
@@ -76,20 +79,24 @@ fun TtsDialogs(viewModel: TtsViewModel = hiltViewModel()) {
 @Composable
 fun TtsMiniPlayer(modifier: Modifier = Modifier, viewModel: TtsViewModel = hiltViewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    val model by viewModel.modelState.collectAsStateWithLifecycle()
+    val models by viewModel.modelStates.collectAsStateWithLifecycle()
+    val prefs by viewModel.prefs.collectAsStateWithLifecycle()
     Column(modifier.navigationBarsPadding()) {
-        when (val m = model) {
+        // The first model that is being fetched (a failure is only shown for the selected model).
+        val busy = TtsModels.ALL.firstOrNull { models[it.id].let { s -> s is ModelState.Downloading || s == ModelState.Verifying || s == ModelState.Extracting } }
+        val selected = TtsModels.byId(prefs.modelId)
+        when (val m = busy?.let { models[it.id] } ?: models[selected.id]) {
             is ModelState.Downloading -> ModelProgress(
-                "Downloading speech model - ${mb(m.downloaded)} of ${mb(m.total)}",
+                "Downloading ${busy!!.name} - ${mb(m.downloaded)} of ${mb(m.total)}",
                 if (m.total > 0) m.downloaded.toFloat() / m.total else 0f,
-                onCancel = viewModel::cancelDownload,
+                onCancel = { viewModel.cancelDownload(busy.id) },
             )
-            ModelState.Verifying -> ModelProgress("Verifying speech model...", null, null)
-            ModelState.Extracting -> ModelProgress("Unpacking speech model...", null, null)
+            ModelState.Verifying -> ModelProgress("Verifying ${busy!!.name}...", null, null)
+            ModelState.Extracting -> ModelProgress("Unpacking ${busy!!.name}...", null, null)
             is ModelState.Failed -> if (state.active.not()) Surface(tonalElevation = 3.dp) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(m.reason, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                    TextButton(onClick = viewModel::startDownload) { Text("Retry") }
+                    TextButton(onClick = { viewModel.startDownload(selected.id) }) { Text("Retry") }
                 }
             }
             else -> Unit
@@ -138,7 +145,7 @@ private fun PlayerBar(state: TtsState, vm: TtsViewModel) {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                 SpeedButton(state.speed, vm::setSpeed)
                 SleepButton(state, vm)
-                VoiceButton(state.voice, vm::setVoice)
+                VoiceButton(TtsModels.byId(state.modelId), state.voice, vm::setVoice)
             }
         }
     }
@@ -177,48 +184,44 @@ private fun SleepButton(state: TtsState, vm: TtsViewModel) {
 }
 
 @Composable
-private fun VoiceButton(voice: Int, onVoice: (Int) -> Unit) {
+private fun VoiceButton(model: TtsModel, voice: Int, onVoice: (Int) -> Unit) {
     var open by remember { mutableStateOf(false) }
     TextButton(onClick = { open = true }) {
-        Text("Voice: " + TtsConfig.SPEAKERS.getOrElse(voice) { "?" }.substringBefore(" ("), maxLines = 1)
+        Text("Voice: " + model.voiceLabel(voice).substringBefore(" ("), maxLines = 1)
     }
     DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-        TtsConfig.SPEAKERS.forEachIndexed { i, name ->
-            DropdownMenuItem(text = { Text(name) }, onClick = { open = false; onVoice(i) })
+        model.voices.forEach { v ->
+            DropdownMenuItem(text = { Text(v.label) }, onClick = { open = false; onVoice(v.id) })
         }
     }
 }
 
-/** Settings screen section: model status, voice, speed, CPU threads, cache size. */
+/** Settings screen section: model list, voice, speed, CPU threads, cache size. */
 @Composable
 fun TtsSettingsSection(modifier: Modifier = Modifier, viewModel: TtsViewModel = hiltViewModel()) {
     val prefs by viewModel.prefs.collectAsStateWithLifecycle()
-    val model by viewModel.modelState.collectAsStateWithLifecycle()
-    var confirmDelete by remember { mutableStateOf(false) }
+    val models by viewModel.modelStates.collectAsStateWithLifecycle()
+    var deleting by remember { mutableStateOf<TtsModel?>(null) }
+    val selected = TtsModels.byId(prefs.modelId)
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Text to speech", style = MaterialTheme.typography.titleMedium)
         Text(
-            "Kokoro runs on this device (English only). Reads the variant shown in the reader.",
+            "Runs on this device (English only). Reads the variant shown in the reader. Pick the model to use:",
             style = MaterialTheme.typography.bodySmall,
         )
-        when (val m = model) {
-            is ModelState.Installed -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Speech model installed", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                OutlinedButton(onClick = { confirmDelete = true }) { Text("Delete model") }
-            }
-            is ModelState.Downloading -> Text("Downloading: ${mb(m.downloaded)} of ${mb(m.total)}", style = MaterialTheme.typography.bodyMedium)
-            ModelState.Verifying -> Text("Verifying...", style = MaterialTheme.typography.bodyMedium)
-            ModelState.Extracting -> Text("Unpacking...", style = MaterialTheme.typography.bodyMedium)
-            is ModelState.Failed -> {
-                Text(m.reason, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
-                OutlinedButton(onClick = viewModel::startDownload) { Text("Retry download") }
-            }
-            ModelState.NotInstalled -> OutlinedButton(onClick = viewModel::startDownload) {
-                Text("Download speech model (${mb(TtsConfig.MODEL_ARCHIVE_BYTES)})")
-            }
+        TtsModels.ALL.forEach { m ->
+            ModelRow(
+                model = m,
+                state = models[m.id] ?: ModelState.NotInstalled,
+                selected = m.id == selected.id,
+                onSelect = { viewModel.selectModel(m.id) },
+                onDownload = { viewModel.startDownload(m.id) },
+                onCancel = { viewModel.cancelDownload(m.id) },
+                onDelete = { deleting = m },
+            )
         }
         Text("Voice", style = MaterialTheme.typography.labelLarge)
-        VoicePicker(prefs.voice, viewModel::setVoice)
+        VoicePicker(selected, prefs.voice, viewModel::setVoice)
         Text("Speed: ${String.format(Locale.US, "%.2f", prefs.speed)}x", style = MaterialTheme.typography.labelLarge)
         Slider(value = prefs.speed, onValueChange = viewModel::setSpeed, valueRange = TtsConfig.SPEED_RANGE)
         Text("Synthesis threads: ${prefs.numThreads}", style = MaterialTheme.typography.labelLarge)
@@ -236,22 +239,62 @@ fun TtsSettingsSection(modifier: Modifier = Modifier, viewModel: TtsViewModel = 
         )
         HorizontalDivider()
     }
-    if (confirmDelete) {
+    deleting?.let { m ->
         AlertDialog(
-            onDismissRequest = { confirmDelete = false },
-            title = { Text("Delete speech model?") },
-            text = { Text("Frees about ${mb(TtsConfig.EXTRACTED_BYTES_ESTIMATE)}. You can download it again later.") },
-            confirmButton = { TextButton(onClick = { confirmDelete = false; viewModel.deleteModel() }) { Text("Delete") } },
-            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
+            onDismissRequest = { deleting = null },
+            title = { Text("Delete ${m.name}?") },
+            text = { Text("Frees about ${mb(m.spec.extractedBytesEstimate)}. You can download it again later.") },
+            confirmButton = { TextButton(onClick = { deleting = null; viewModel.deleteModel(m.id) }) { Text("Delete") } },
+            dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } },
         )
     }
 }
 
+/** One model: radio (is it the one in use), name, description, size and its install state with the matching action. */
 @Composable
-private fun VoicePicker(voice: Int, onVoice: (Int) -> Unit) {
+private fun ModelRow(
+    model: TtsModel,
+    state: ModelState,
+    selected: Boolean,
+    onSelect: () -> Unit,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        RadioButton(selected = selected, onClick = onSelect)
+        Column(Modifier.weight(1f).padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(model.name, style = MaterialTheme.typography.bodyLarge)
+            Text(model.description, style = MaterialTheme.typography.bodySmall)
+            Text("Download: ${mb(model.spec.archiveBytes)}", style = MaterialTheme.typography.bodySmall)
+            when (state) {
+                is ModelState.Installed -> Text("Installed", style = MaterialTheme.typography.bodySmall)
+                is ModelState.Downloading -> {
+                    Text("Downloading: ${mb(state.downloaded)} of ${mb(state.total)}", style = MaterialTheme.typography.bodySmall)
+                    LinearProgressIndicator(progress = { if (state.total > 0) state.downloaded.toFloat() / state.total else 0f }, Modifier.fillMaxWidth())
+                }
+                ModelState.Verifying -> Text("Verifying...", style = MaterialTheme.typography.bodySmall)
+                ModelState.Extracting -> Text("Unpacking...", style = MaterialTheme.typography.bodySmall)
+                is ModelState.Failed -> Text(state.reason, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                ModelState.NotInstalled -> Unit
+            }
+        }
+        Column(Modifier.padding(top = 4.dp)) {
+            when (state) {
+                is ModelState.Installed -> OutlinedButton(onClick = onDelete) { Text("Delete") }
+                is ModelState.Downloading, ModelState.Verifying, ModelState.Extracting -> OutlinedButton(onClick = onCancel) { Text("Cancel") }
+                is ModelState.Failed -> OutlinedButton(onClick = onDownload) { Text("Retry") }
+                ModelState.NotInstalled -> OutlinedButton(onClick = onDownload) { Text("Download") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VoicePicker(model: TtsModel, voice: Int, onVoice: (Int) -> Unit) {
     var open by remember { mutableStateOf(false) }
-    OutlinedButton(onClick = { open = true }) { Text(TtsConfig.SPEAKERS.getOrElse(voice) { "?" }) }
+    OutlinedButton(onClick = { open = true }) { Text(model.voiceLabel(voice)) }
     DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-        TtsConfig.SPEAKERS.forEachIndexed { i, name -> DropdownMenuItem(text = { Text(name) }, onClick = { open = false; onVoice(i) }) }
+        model.voices.forEach { v -> DropdownMenuItem(text = { Text(v.label) }, onClick = { open = false; onVoice(v.id) }) }
     }
 }

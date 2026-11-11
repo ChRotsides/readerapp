@@ -3,10 +3,15 @@ package com.readerapp.tts
 import java.io.File
 import java.util.zip.CRC32
 
-/** Identity of one synthesized sentence. The text hash invalidates entries when a variant is re-processed. */
+/**
+ * Identity of one synthesized sentence. The text hash invalidates entries when a variant is re-processed; [model] is
+ * the short [TtsModel.tag], so another model never reuses a clip, and [TtsConfig.SHAPING_VERSION] separates clips
+ * made before the current trimming / pause rules.
+ */
 data class AudioKey(
     val chapterId: Long,
     val variant: String,
+    val model: String,
     val voice: Int,
     val speed: Float,
     val paragraph: Int,
@@ -14,7 +19,7 @@ data class AudioKey(
     val textHash: Long,
 ) {
     fun fileName(): String =
-        "c${chapterId}_${variant}_v${voice}_s${Math.round(speed * 100)}_p${paragraph}_${sentence}_${textHash.toString(16)}.wav"
+        "c${chapterId}_${variant}_m${model}_h${TtsConfig.SHAPING_VERSION}_v${voice}_s${Math.round(speed * 100)}_p${paragraph}_${sentence}_${textHash.toString(16)}.wav"
 
     companion object {
         fun hash(text: String): Long = CRC32().also { it.update(text.toByteArray()) }.value

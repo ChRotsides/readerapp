@@ -51,7 +51,7 @@ fun interface FreeSpace {
 }
 
 /**
- * Download -> verify -> extract -> install state machine for the Kokoro model. All I/O goes through interfaces so it
+ * Download -> verify -> extract -> install state machine for one speech model. All I/O goes through interfaces so it
  * can be tested with fakes. A partial archive (`<dir>.tar.bz2.part`) is kept after a failure so a retry resumes it.
  */
 class ModelInstaller(

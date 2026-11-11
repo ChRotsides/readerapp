@@ -7,6 +7,8 @@ import com.readerapp.tts.SleepSpec
 import com.readerapp.tts.SpeechRef
 import com.readerapp.tts.TtsCommand
 import com.readerapp.tts.TtsController
+import com.readerapp.tts.TtsModel
+import com.readerapp.tts.TtsModels
 import com.readerapp.tts.TtsPrefs
 import com.readerapp.tts.TtsSettings
 import com.readerapp.tts.TtsState
@@ -22,7 +24,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-private data class PendingStart(val from: SpeechRef, val variant: TextVariant?)
+private data class PendingStart(val from: SpeechRef, val variant: TextVariant?, val modelId: String)
 
 @HiltViewModel
 class TtsViewModel @Inject constructor(
@@ -31,21 +33,27 @@ class TtsViewModel @Inject constructor(
     private val settings: TtsSettings,
 ) : ViewModel() {
     val state: StateFlow<TtsState> = controller.state
-    val modelState: StateFlow<ModelState> = models.state
+
+    /** Install state of every model, keyed by model id. */
+    val modelStates: StateFlow<Map<String, ModelState>> = models.states
     val messages: SharedFlow<String> = controller.messages
     val prefs: StateFlow<TtsPrefs> = settings.prefs.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), TtsPrefs())
 
     private var pending: PendingStart? = null
-    private val _confirmDownload = MutableStateFlow(false)
+    private val _confirmDownload = MutableStateFlow<TtsModel?>(null)
 
-    /** True while the "download the speech model?" dialog should be shown. */
-    val confirmDownload: StateFlow<Boolean> = _confirmDownload.asStateFlow()
+    /** The model the "download the speech model?" dialog is about, or null when it should not be shown. */
+    val confirmDownload: StateFlow<TtsModel?> = _confirmDownload.asStateFlow()
 
     init {
         // A start requested before the model existed is carried out as soon as the install finishes.
         viewModelScope.launch {
-            models.state.collect { s ->
-                if (s is ModelState.Installed) pending?.let { p -> pending = null; controller.send(TtsCommand.Start(p.from, p.variant)) }
+            models.states.collect { all ->
+                val p = pending ?: return@collect
+                if (all[p.modelId] is ModelState.Installed) {
+                    pending = null
+                    controller.send(TtsCommand.Start(p.from, p.variant))
+                }
             }
         }
     }
@@ -58,36 +66,65 @@ class TtsViewModel @Inject constructor(
 
     fun readFrom(chapterId: Long, variant: TextVariant, paragraph: Int) {
         val from = SpeechRef(chapterId, paragraph.coerceAtLeast(0), 0)
-        if (models.installer.isInstalled()) {
-            controller.send(TtsCommand.Start(from, variant))
-        } else {
-            pending = PendingStart(from, variant)
-            val s = modelState.value
-            if (s is ModelState.Downloading || s == ModelState.Verifying || s == ModelState.Extracting) return
-            _confirmDownload.value = true
+        viewModelScope.launch {
+            val model = TtsModels.byId(settings.current().modelId)
+            if (models.installer(model.id).isInstalled()) {
+                controller.send(TtsCommand.Start(from, variant))
+            } else {
+                pending = PendingStart(from, variant, model.id)
+                val s = models.state(model.id).value
+                if (s is ModelState.Downloading || s == ModelState.Verifying || s == ModelState.Extracting) return@launch
+                _confirmDownload.value = model
+            }
         }
     }
 
+    /** Download the model the dialog asks about, and make it the selected one (unless something is being read). */
     fun confirmDownload() {
-        _confirmDownload.value = false
-        models.startDownload()
+        val model = _confirmDownload.value ?: return
+        _confirmDownload.value = null
+        models.startDownload(model.id)
+        if (!state.value.active) viewModelScope.launch { settings.setModel(model.id) }
     }
 
     fun dismissDownload() {
-        _confirmDownload.value = false
+        _confirmDownload.value = null
         pending = null
     }
 
-    fun startDownload() = models.startDownload()
+    fun startDownload(modelId: String) = models.startDownload(modelId)
 
-    fun cancelDownload() {
-        pending = null
-        models.cancelDownload()
+    fun cancelDownload(modelId: String) {
+        if (pending?.modelId == modelId) pending = null
+        models.cancelDownload(modelId)
     }
 
-    fun deleteModel() {
-        send(TtsCommand.Stop)
-        models.installer.delete()
+    /** Deletes a model; if it is the one being read, reading stops first. */
+    fun deleteModel(modelId: String) {
+        if (state.value.active && state.value.modelId == modelId) send(TtsCommand.Stop)
+        models.installer(modelId).delete()
+    }
+
+    /**
+     * Settings picker: an installed model becomes the selected one, otherwise the user is offered its download
+     * (which selects it when confirmed).
+     */
+    fun selectModel(modelId: String) {
+        val model = TtsModels.byId(modelId)
+        if (models.installer(model.id).isInstalled()) setModel(model.id) else _confirmDownload.value = model
+    }
+
+    /**
+     * Changes the model. While reading, an installed model restarts generation at the current sentence; one that is
+     * not installed is refused with a message. When idle the preference is just saved.
+     */
+    fun setModel(modelId: String) {
+        val model = TtsModels.byId(modelId)
+        when {
+            state.value.active && models.installer(model.id).isInstalled() -> send(TtsCommand.SetModel(model.id))
+            state.value.active -> controller.message("${model.name} needs to be downloaded first.")
+            else -> viewModelScope.launch { settings.setModel(model.id) }
+        }
     }
 
     fun send(command: TtsCommand) = controller.send(command)

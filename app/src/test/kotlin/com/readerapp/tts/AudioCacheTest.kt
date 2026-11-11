@@ -18,7 +18,7 @@ class AudioCacheTest {
     private fun cache(max: Long) = AudioCache(tmp.newFolder(), max) { now++ }
 
     private fun key(sentence: Int, voice: Int = 1, speed: Float = 1f, text: String = "t$sentence") =
-        AudioKey(7, "TRANSLATED", voice, speed, 0, sentence, AudioKey.hash(text))
+        AudioKey(7, "TRANSLATED", "k19", voice, speed, 0, sentence, AudioKey.hash(text))
 
     /** A fake WAV of [bytes] total bytes (header size counted). */
     private fun write(c: AudioCache, k: AudioKey, bytes: Int) = c.put(k) { it.writeBytes(ByteArray(bytes)) }
@@ -27,11 +27,17 @@ class AudioCacheTest {
     fun keyDependsOnEveryComponent() {
         val base = key(0)
         val names = setOf(
-            base, base.copy(chapterId = 8), base.copy(variant = "FIXED"), base.copy(voice = 2), base.copy(speed = 1.25f),
+            base, base.copy(chapterId = 8), base.copy(variant = "FIXED"), base.copy(model = "st"), base.copy(voice = 2), base.copy(speed = 1.25f),
             base.copy(paragraph = 1), base.copy(sentence = 1), base.copy(textHash = AudioKey.hash("other")),
         ).map { it.fileName() }
-        assertEquals(8, names.toSet().size)
+        assertEquals(9, names.toSet().size)
         assertEquals(base.fileName(), key(0).fileName())
+    }
+
+    @Test
+    fun fileNameCarriesModelTagAndShapingVersion() {
+        val name = key(0).fileName()
+        assertTrue(name, name.contains("_mk19_h${TtsConfig.SHAPING_VERSION}_"))
     }
 
     @Test
